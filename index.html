@@ -681,11 +681,11 @@ function renderGrid(){
   const availSel = selectedRooms.filter(id=>{ const r=state.rooms.find(x=>x.id===id); return r && r.status==='available'; });
   const occSel = selectedRooms.filter(id=>{ const r=state.rooms.find(x=>x.id===id); return r && r.status==='occupied'; });
   const mixed = availSel.length>0 && occSel.length>0;
-  const singleCount = state.rooms.filter(r=>r.type==='single').length;
-  const twinCount = state.rooms.filter(r=>r.type==='twin').length;
+  const singleOccCount = state.rooms.filter(r=>r.type==='single' && r.status==='occupied').length;
+  const twinOccCount = state.rooms.filter(r=>r.type==='twin' && r.status==='occupied').length;
   const toolbar = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:${showBedSummary?'12px':'18px'};flex-wrap:wrap;">
-      <button class="btn btn-ghost btn-sm" id="toggle-bed-summary">${showBedSummary?'▲':'▼'} ຈຳນວນຕຽງ</button>
+      <button class="btn btn-ghost btn-sm" id="toggle-bed-summary">${showBedSummary?'▲':'▼'} ຈຳນວນຕຽງ (ມີແຂກພັກ)</button>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         ${selectMode ? `
           <span style="font-size:13px;color:var(--text-mute);">ເລືອກແລ້ວ ${selectedRooms.length} ຫ້ອງ</span>
@@ -700,8 +700,8 @@ function renderGrid(){
     </div>
     ${showBedSummary ? `
     <div class="stat-row" style="margin-bottom:18px;">
-      <div class="stat"><div class="label">ຫ້ອງຕຽງດ່ຽວ</div><div class="value num">${singleCount}</div></div>
-      <div class="stat"><div class="label">ຫ້ອງຕຽງຄູ່</div><div class="value num">${twinCount}</div></div>
+      <div class="stat"><div class="label">ຫ້ອງຕຽງດ່ຽວ ທີ່ມີແຂກພັກ</div><div class="value num">${singleOccCount}</div></div>
+      <div class="stat"><div class="label">ຫ້ອງຕຽງຄູ່ ທີ່ມີແຂກພັກ</div><div class="value num">${twinOccCount}</div></div>
     </div>` : ''}`;
   return toolbar + [2,3].map(floor=>{
     const rooms = state.rooms.filter(r=>r.floor===floor);
