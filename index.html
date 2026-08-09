@@ -141,6 +141,19 @@
     border:1px solid var(--paper-line);border-radius:8px;background:#FCFAF5;color:var(--text-dark);
   }
   .field input:focus, .field select:focus{outline:2px solid var(--ring);outline-offset:1px;border-color:var(--brass);}
+  .nat-field{position:relative;}
+  .nat-results{
+    display:none;position:absolute;top:100%;left:0;right:0;margin-top:4px;
+    background:var(--card);border:1px solid var(--paper-line);border-radius:8px;
+    box-shadow:var(--shadow);max-height:220px;overflow-y:auto;z-index:60;
+  }
+  .nat-results.show{display:block;}
+  .nat-results div{
+    padding:8px 11px;font-size:13.5px;cursor:pointer;
+    display:flex;justify-content:space-between;align-items:center;gap:10px;
+  }
+  .nat-results div:hover{background:var(--available-bg);}
+  .nat-results .abbr{color:var(--text-mute);font-size:11px;font-weight:700;letter-spacing:.03em;flex-shrink:0;}
   .radio-row{display:flex;gap:16px;padding-top:2px;flex-wrap:wrap;}
   .radio-row label{display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:500;color:var(--text-dark);}
 
@@ -271,7 +284,42 @@ const TYPE_LABEL = {single:'ຫ້ອງຕຽງດ່ຽວ', twin:'ຫ້ອ�
 const FLOOR_LABEL = {2:'ຊັ້ນ 2', 3:'ຊັ້ນ 3'};
 const STORAGE_KEY = 'hotel-front-desk-state-v2';
 const RECEIVERS = ['ພໍ່','ແມ່'];
-const NATIONALITIES = ['ລາວ','Thailand','China','Vietnam','Myanmar','Cambodia','South Korea','Japan','France','Germany','United Kingdom','United States','Australia','New Zealand','Russia','India','Singapore','Malaysia','Indonesia','Philippines'];
+const NATIONALITY_CODES = [{c:"ABW",n:"Aruba"},{c:"AFG",n:"Afghanistan"},{c:"AGO",n:"Angola"},{c:"AIA",n:"Anguilla"},{c:"ALB",n:"Albania"},{c:"AND",n:"Andorra"},{c:"ANT",n:"Netherlands Antilles"},{c:"ARE",n:"United Arab Emirates"},{c:"ARG",n:"Argentina"},{c:"ARM",n:"Armenia"},{c:"ASM",n:"American Samoa"},{c:"ATA",n:"Antarctica"},{c:"ATF",n:"French Southern Territories"},{c:"ATG",n:"Antigua and Barbuda"},{c:"AUS",n:"Australia"},{c:"AUT",n:"Austria"},{c:"AZE",n:"Azerbaijan"},{c:"BDI",n:"Burundi"},{c:"BEL",n:"Belgium"},{c:"BEN",n:"Benin"},{c:"BFA",n:"Burkina Faso"},{c:"BGD",n:"Bangladesh"},{c:"BGR",n:"Bulgaria"},{c:"BHR",n:"Bahrain"},{c:"BHS",n:"Bahamas"},{c:"BIH",n:"Bosnia and Herzegovina"},{c:"BLR",n:"Belarus"},{c:"BLZ",n:"Belize"},{c:"BMU",n:"Bermuda"},{c:"BOL",n:"Bolivia"},{c:"BRA",n:"Brazil"},{c:"BRB",n:"Barbados"},{c:"BRN",n:"Brunei Darussalam"},{c:"BTN",n:"Bhutan"},{c:"BUR",n:"Burma"},{c:"BVT",n:"Bouvet Island"},{c:"BWA",n:"Botswana"},{c:"BYS",n:"Byelorussian - Soviet Socialist Rep"},{c:"CAF",n:"Central African Republic"},{c:"CAN",n:"Canada"},{c:"CCK",n:"Cocos (Keeling) Islands"},{c:"CHE",n:"Switzerland"},{c:"CHL",n:"Chile"},{c:"CHN",n:"China"},{c:"CIV",n:"Cote d'Ivoire"},{c:"CMR",n:"Cameroon"},{c:"COG",n:"Congo"},{c:"COK",n:"Cook Islands"},{c:"COL",n:"Colombia"},{c:"COM",n:"Comoros"},{c:"CPV",n:"Cape Verde"},{c:"CRI",n:"Costa Rica"},{c:"CSK",n:"Czechoslovakia"},{c:"CUB",n:"Cuba"},{c:"CXR",n:"Christmas Island"},{c:"CYM",n:"Cayman Islands"},{c:"CYP",n:"Cyprus"},{c:"CZE",n:"Czech Republic"},{c:"D",n:"Germany"},{c:"DDR",n:"Germany (Democratic Republic of)"},{c:"DJI",n:"Djibouti"},{c:"DMA",n:"Dominica"},{c:"DNK",n:"Denmark"},{c:"DOM",n:"Dominican Republic"},{c:"DZA",n:"Algeria"},{c:"ECU",n:"Ecuador"},{c:"EGY",n:"Egypt"},{c:"ERI",n:"Eritrea"},{c:"ESH",n:"Western Sahara"},{c:"ESP",n:"Spain"},{c:"EST",n:"Estonia"},{c:"ETH",n:"Ethiopia"},{c:"FIN",n:"Finland"},{c:"FJI",n:"Fiji"},{c:"FLK",n:"Falkland Islands (Malvinas)"},{c:"FRA",n:"France"},{c:"FRO",n:"Faroe Islands"},{c:"FSM",n:"Micronesia, Federated States of"},{c:"FXX",n:"France, Metropolitan"},{c:"GAB",n:"Gabon"},{c:"GBD",n:"British Dependent Territories Citizen"},{c:"GBN",n:"British - National (Overseas)"},{c:"GBO",n:"British - Overseas Citizen"},{c:"GBP",n:"British - Protected Person"},{c:"GBR",n:"British - Citizen"},{c:"GBS",n:"British - Subject"},{c:"GEO",n:"Georgia"},{c:"GHA",n:"Ghana"},{c:"GIB",n:"Gibraltar"},{c:"GIN",n:"Guinea"},{c:"GLP",n:"Guadeloupe"},{c:"GMB",n:"Gambia"},{c:"GNB",n:"Guinea-Bissau"},{c:"GNQ",n:"Equatorial Guinea"},{c:"GRC",n:"Greece"},{c:"GRD",n:"Grenada"},{c:"GRL",n:"Greenland"},{c:"GTM",n:"Guatemala"},{c:"GUF",n:"French Guiana"},{c:"GUM",n:"Guam"},{c:"GUY",n:"Guyana"},{c:"HKG",n:"Hong Kong"},{c:"HMD",n:"Heard and McDonald Islands"},{c:"HND",n:"Honduras"},{c:"HRV",n:"Croatia"},{c:"HTI",n:"Haiti"},{c:"HUN",n:"Hungary"},{c:"HVO",n:"Burkina Faso"},{c:"IDN",n:"Indonesia"},{c:"IND",n:"India"},{c:"IOT",n:"British Indian Ocean Territory"},{c:"IRL",n:"Ireland"},{c:"IRN",n:"Iran, Islamic Republic of"},{c:"IRQ",n:"Iraq"},{c:"ISL",n:"Iceland"},{c:"ISR",n:"Israel"},{c:"ITA",n:"Italy"},{c:"JAM",n:"Jamaica"},{c:"JOR",n:"Jordan"},{c:"JPN",n:"Japan"},{c:"KAZ",n:"Kazakhstan"},{c:"KEN",n:"Kenya"},{c:"KGZ",n:"Kyrgyzstan"},{c:"KHM",n:"Cambodia"},{c:"KIR",n:"Kiribati"},{c:"KNA",n:"Saint Kitts and Nevis"},{c:"KOR",n:"Republic of Korea"},{c:"KWT",n:"Kuwait"},{c:"LAO",n:"Lao Peoples Democratic Republic"},{c:"LBN",n:"Lebanon"},{c:"LBR",n:"Liberia"},{c:"LBY",n:"Libyan Arab Jamahiriya"},{c:"LCA",n:"Saint Lucia"},{c:"LIE",n:"Liechtenstein"},{c:"LKA",n:"Sri Lanka"},{c:"LSO",n:"Lesotho"},{c:"LTU",n:"Lithuania"},{c:"LUX",n:"Luxembourg"},{c:"LVA",n:"Latvia"},{c:"MAC",n:"Macau"},{c:"MAR",n:"Morocco"},{c:"MCO",n:"Monaco"},{c:"MDA",n:"Moldova, Republic of"},{c:"MDG",n:"Madagascar"},{c:"MDV",n:"Maldives"},{c:"MEX",n:"Mexico"},{c:"MHL",n:"Marshall Islands"},{c:"MKD",n:"Macedonia, Former Yugoslav Republic of"},{c:"MLI",n:"Mali"},{c:"MLT",n:"Malta"},{c:"MMR",n:"Myanmar"},{c:"MNG",n:"Mongolia"},{c:"MNP",n:"Northern Mariana Islands"},{c:"MOZ",n:"Mozambique"},{c:"MRT",n:"Mauritania"},{c:"MSR",n:"Montserrat"},{c:"MTQ",n:"Martinique"},{c:"MUS",n:"Mauritius"},{c:"MWI",n:"Malawi"},{c:"MYS",n:"Malaysia"},{c:"MYT",n:"Mayotte"},{c:"NAM",n:"Namibia"},{c:"NCL",n:"New Caledonia"},{c:"NER",n:"Niger"},{c:"NFK",n:"Norfolk Island"},{c:"NGA",n:"Nigeria"},{c:"NIC",n:"Nicaragua"},{c:"NIU",n:"Niue"},{c:"NLD",n:"Netherlands, Kingdom of the"},{c:"NOR",n:"Norway"},{c:"NPL",n:"Nepal"},{c:"NRU",n:"Nauru"},{c:"NTZ",n:"Neutral Zone"},{c:"NZL",n:"New Zealand"},{c:"OMN",n:"Oman"},{c:"PAK",n:"Pakistan"},{c:"PAN",n:"Panama"},{c:"PCN",n:"Pitcairn"},{c:"PER",n:"Peru"},{c:"PHL",n:"Philippines"},{c:"PLW",n:"Palau"},{c:"PNG",n:"Papua New Guinea"},{c:"POL",n:"Poland"},{c:"PRI",n:"Puerto Rico"},{c:"PRK",n:"Democratic Peoples Republic of Korea"},{c:"PRT",n:"Portugal"},{c:"PRY",n:"Paraguay"},{c:"PYF",n:"French Polynesia"},{c:"QAT",n:"Qatar"},{c:"REU",n:"Reunion"},{c:"ROM",n:"Romania"},{c:"RUS",n:"Russian Federation"},{c:"RWA",n:"Rwanda"},{c:"SAU",n:"Saudi Arabia"},{c:"SDN",n:"Sudan"},{c:"SEN",n:"Senegal"},{c:"SGP",n:"Singapore"},{c:"SGS",n:"South Georgia and the South Sandwich"},{c:"SHN",n:"St Helena"},{c:"SJM",n:"Svalbard and Jan Mayen Islands"},{c:"SLB",n:"Solomon Islands"},{c:"SLE",n:"Sierra Leone"},{c:"SLV",n:"El Salvador"},{c:"SMR",n:"San Marino"},{c:"SOM",n:"Somalia"},{c:"SPM",n:"St Pierre and Miquelon"},{c:"STP",n:"Sao Tome & Principe"},{c:"SUN",n:"Soviet Union"},{c:"SUR",n:"Suriname"},{c:"SVK",n:"Slovak Republic"},{c:"SVN",n:"Slovenia"},{c:"SWE",n:"Sweden"},{c:"SWZ",n:"Swaziland"},{c:"SYC",n:"Seychelles"},{c:"SYR",n:"Syrian Arab Republic"},{c:"TCA",n:"Turks and Caicos Islands"},{c:"TCD",n:"Chad"},{c:"TGO",n:"Togo"},{c:"THA",n:"Thailand"},{c:"TJK",n:"Tajikistan"},{c:"TKL",n:"Tokelau"},{c:"TKM",n:"Turkmenistan"},{c:"TMP",n:"East Timor"},{c:"TON",n:"Tonga"},{c:"TTO",n:"Trinidad and Tobago"},{c:"TUN",n:"Tunisia"},{c:"TUR",n:"Turkey"},{c:"TUV",n:"Tuvalu"},{c:"TWN",n:"Taiwan, Province of China"},{c:"TZA",n:"United Republic of Tanzania"},{c:"UGA",n:"Uganda"},{c:"UKR",n:"Ukraine"},{c:"UMI",n:"United States Minor Outlying Island"},{c:"UNA",n:"United Nations Agency"},{c:"UNO",n:"United Nations Organisation"},{c:"URY",n:"Uruguay"},{c:"USA",n:"United States of America"},{c:"UZB",n:"Uzbekistan"},{c:"VAT",n:"Vatican City State (Holy See)"},{c:"VCT",n:"St Vincent and the Grenadines"},{c:"VEN",n:"Venezuela"},{c:"VGB",n:"Virgin Islands (British)"},{c:"VIR",n:"Virgin Islands (U.S)"},{c:"VNM",n:"Vietnam"},{c:"VUT",n:"Vanuatu"},{c:"WLF",n:"Wallis and Futuna Islands"},{c:"WSM",n:"Samoa"},{c:"XXA",n:"Stateless person"},{c:"XXB",n:"Refugee, Art 1 1951 convention"},{c:"XXC",n:"Refugee, not Art 1 1951 convention"},{c:"XXX",n:"Unspecified nationality"},{c:"YEM",n:"Yemen, Republic of"},{c:"YMD",n:"Yemen (Democratic Peoples Republic)"},{c:"YUG",n:"Yugoslavia"},{c:"ZAF",n:"South Africa"},{c:"ZAR",n:"Zaire"},{c:"ZMB",n:"Zambia"},{c:"ZWE",n:"Zimbabwe"}];
+function natMatches(query){
+  const q = (query||'').trim().toUpperCase();
+  if(!q) return [];
+  const starts = [];
+  const contains = [];
+  for(const item of NATIONALITY_CODES){
+    if(item.c.toUpperCase().startsWith(q)) starts.push(item);
+    else if(item.n.toUpperCase().includes(q)) contains.push(item);
+  }
+  return starts.concat(contains).slice(0,12);
+}
+function wireNatAutocomplete(inputId, resultsId, prop, onPicked){
+  const el = document.getElementById(inputId);
+  const box = document.getElementById(resultsId);
+  if(!el || !box) return;
+  const renderResults = ()=>{
+    const matches = natMatches(el.value);
+    if(!matches.length){ box.classList.remove('show'); box.innerHTML=''; return; }
+    box.innerHTML = matches.map(m=>`<div data-name="${m.n.replace(/"/g,'&quot;')}"><span>${m.n}</span><span class="abbr">${m.c}</span></div>`).join('');
+    box.classList.add('show');
+  };
+  el.oninput = ()=>{ modal.form[prop] = el.value; renderResults(); };
+  el.onfocus = ()=>{ renderResults(); };
+  el.onblur = ()=>{ setTimeout(()=>{ box.classList.remove('show'); box.innerHTML=''; }, 150); };
+  box.onmousedown = (e)=>{
+    const row = e.target.closest('[data-name]');
+    if(!row) return;
+    e.preventDefault();
+    el.value = row.dataset.name;
+    modal.form[prop] = row.dataset.name;
+    box.classList.remove('show');
+    box.innerHTML = '';
+    if(onPicked) onPicked();
+  };
+}
 
 /* ---------------- Local time helpers (never use UTC) ---------------- */
 function localDateStr(d){
@@ -910,9 +958,9 @@ function renderCheckinModal(){
           </select></div>
         <div class="field"><label>ເລກບັດປະຈຳຕົວ ສປປ ລາວ / ພາສປອດ</label>
           <input id="f-doc" value="${f.docNumber||''}"></div>
-        <div class="field"><label>ສັນຊາດ</label>
-          <input id="f-nat" list="nat-datalist" value="${f.nationality||''}">
-          <datalist id="nat-datalist">${NATIONALITIES.map(n=>`<option value="${n}">`).join('')}</datalist>
+        <div class="field nat-field"><label>ສັນຊາດ</label>
+          <input id="f-nat" autocomplete="off" placeholder="ພິມຕົວຫຍໍ້ ເຊັ່ນ LAO, THA, USA..." value="${f.nationality||''}">
+          <div class="nat-results" id="f-nat-results"></div>
         </div>
         <div class="field full"><label>ເບີໂທລະສັບ / ຊ່ອງທາງຕິດຕໍ່</label>
           <input id="f-phone" value="${f.phone||''}"></div>
@@ -990,9 +1038,9 @@ function renderGroupCheckinModal(){
           </select></div>
         <div class="field"><label>ເລກບັດປະຈຳຕົວ / ພາສປອດ</label>
           <input id="f-doc" value="${f.docNumber||''}"></div>
-        <div class="field"><label>ສັນຊາດ</label>
-          <input id="f-nat" list="nat-datalist" value="${f.nationality||''}">
-          <datalist id="nat-datalist">${NATIONALITIES.map(n=>`<option value="${n}">`).join('')}</datalist>
+        <div class="field nat-field"><label>ສັນຊາດ</label>
+          <input id="f-nat" autocomplete="off" placeholder="ພິມຕົວຫຍໍ້ ເຊັ່ນ LAO, THA, USA..." value="${f.nationality||''}">
+          <div class="nat-results" id="f-nat-results"></div>
         </div>
         <div class="field full"><label>ເບີໂທລະສັບ / ຊ່ອງທາງຕິດຕໍ່</label>
           <input id="f-phone" value="${f.phone||''}"></div>
@@ -1128,9 +1176,9 @@ function renderEditModal(){
             <option value="ອື່ນໆ" ${f.gender==='ອື່ນໆ'?'selected':''}>ອື່ນໆ</option>
           </select></div>
         <div class="field"><label>ເລກບັດປະຈຳຕົວ / ພາສປອດ</label><input id="ef-doc" value="${f.docNumber||''}"></div>
-        <div class="field"><label>ສັນຊາດ</label>
-          <input id="ef-nat" list="nat-datalist" value="${f.nationality||''}">
-          <datalist id="nat-datalist">${NATIONALITIES.map(n=>`<option value="${n}">`).join('')}</datalist>
+        <div class="field nat-field"><label>ສັນຊາດ</label>
+          <input id="ef-nat" autocomplete="off" placeholder="ພິມຕົວຫຍໍ້ ເຊັ່ນ LAO, THA, USA..." value="${f.nationality||''}">
+          <div class="nat-results" id="ef-nat-results"></div>
         </div>
         <div class="field full"><label>ເບີໂທລະສັບ</label><input id="ef-phone" value="${f.phone||''}"></div>
         <div class="field full">
@@ -1430,7 +1478,7 @@ function attachHandlers(){
     bind('f-guestname','guestName');
     bind('f-gender','gender');
     bind('f-doc','docNumber');
-    bind('f-nat','nationality');
+    wireNatAutocomplete('f-nat','f-nat-results','nationality', ()=>updateCheckinLive());
     bind('f-phone','phone');
     bind('f-nights','nights','nights');
     bind('f-price','price');
@@ -1469,7 +1517,7 @@ function attachHandlers(){
     bind('f-guestname','guestName');
     bind('f-gender','gender');
     bind('f-doc','docNumber');
-    bind('f-nat','nationality');
+    wireNatAutocomplete('f-nat','f-nat-results','nationality', ()=>updateGroupCheckinLive());
     bind('f-phone','phone');
     bind('f-nights','nights','nights');
     bind('f-cidate','ciDate','cidate');
@@ -1554,7 +1602,7 @@ function attachHandlers(){
     bind('ef-guestname','guestName');
     bind('ef-gender','gender');
     bind('ef-doc','docNumber');
-    bind('ef-nat','nationality');
+    wireNatAutocomplete('ef-nat','ef-nat-results','nationality');
     bind('ef-phone','phone');
     bind('ef-wechat-amount','wechatAmount');
     const setPay = (val, el)=>{
