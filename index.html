@@ -485,23 +485,38 @@ function bookingUnpaid(bookingId){
 function revenueForDate(dateStr){ return state.revenueLog.filter(l=>l.date===dateStr && !l.voided); }
 function revenueForMonth(monthStr){ return state.revenueLog.filter(l=>l.date.slice(0,7)===monthStr && !l.voided); }
 
-async function sendReportToExcel(entries){
+// Every send rewrites the sheet from the complete log rather than appending the new rows, so a
+// cancelled check-in (voided, hence missing here) disappears from the sheet instead of lingering.
+// Deliberately ignores the selected report period: the sheet mirrors everything, not one range.
+function entriesToSync(){
+  return state.revenueLog
+    .filter(e=> !e.voided && (e.kind==='settle' || entryPaymentType(e)!=='later'))
+    .sort((a,b)=> (a.date+' '+(a.time||'')).localeCompare(b.date+' '+(b.time||'')));
+}
+
+async function sendReportToExcel(){
   if(!REPORT_ENDPOINT_URL){ alert('ຍັງບໍ່ໄດ້ຕັ້ງຄ່າລິ້ງ Excel (REPORT_ENDPOINT_URL) — ກະລຸນາແຈ້ງຜູ້ດູແລລະບົບ'); return; }
-  const pending = entries.filter(e=>!e.exportedToSheet);
-  if(pending.length===0){ alert('ບໍ່ມີລາຍການໃໝ່ທີ່ຍັງບໍ່ໄດ້ສົ່ງ ໃນຊ່ວງທີ່ເລືອກ'); return; }
-  pending.sort((a,b)=> (a.date+' '+(a.time||'')).localeCompare(b.date+' '+(b.time||'')));
-  const rows = pending.map(e=>({
-    date: fmtDate(e.date), time: e.time||'', room: e.roomId, method: payLabel(entryPaymentType(e)), total: e.amount
-  }));
+  const entries = entriesToSync();
+  if(entries.length===0){ alert('ບໍ່ມີລາຍການທີ່ຈະສົ່ງ'); return; }
+  const rows = entries.map(e=>{
+    const pt = entryPaymentType(e);
+    return {
+      date: fmtDate(e.date), iso: e.date, time: e.time||'', room: e.roomId,
+      method: payLabel(pt), total: e.amount,
+      // Classify here, where the payment type is known, so the sheet never re-derives it from labels.
+      pay: pt==='cash' ? 'cash' : (DIGITAL_PAY_TYPES.includes(pt) ? 'transfer' : 'other')
+    };
+  });
   reportSending = true; reportStatusMsg = `ກຳລັງສົ່ງ ${rows.length} ລາຍການ...`; render();
   try{
     const res = await fetch(REPORT_ENDPOINT_URL, {
       method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({token:REPORT_SECRET, rows})
+      body: JSON.stringify({token:REPORT_SECRET, mode:'replace', rows})
     });
     const data = await res.json();
     if(!data.ok) throw new Error(data.error||'unknown error');
-    pending.forEach(e=>{ e.exportedToSheet=true; });
+    const sentIds = new Set(entries.map(e=>e.id));
+    state.revenueLog.forEach(e=>{ e.exportedToSheet = sentIds.has(e.id); });
     await saveState();
     reportStatusMsg = `ສົ່ງສຳເລັດ ${rows.length} ລາຍການ`;
     alert(`ສົ່ງເຂົ້າ Excel ສຳເລັດ: ${rows.length} ລາຍການ`);
@@ -837,7 +852,7 @@ function renderReports(){
   const digital = receivedEntries.filter(e=>DIGITAL_PAY_TYPES.includes(entryPaymentType(e))).reduce((s,e)=>s+e.amount,0);
   const later = laterNewEntries.reduce((s,e)=>s+e.amount,0);
   const roomNights = allEntries.length;
-  const unexportedCount = receivedEntries.filter(e=>!e.exportedToSheet).length;
+  const syncCount = entriesToSync().length;
 
   return `
   <div class="panel">
@@ -845,7 +860,7 @@ function renderReports(){
       <h2 style="margin:0;">ລາຍງານລາຍຮັບ</h2>
       <div style="display:flex;align-items:center;gap:10px;">
         ${reportStatusMsg ? `<span style="font-size:12px;color:var(--text-mute);">${reportStatusMsg}</span>` : ''}
-        <button class="btn btn-primary btn-sm" id="send-report-btn" ${reportSending||unexportedCount===0?'disabled':''}>⤴ ສົ່ງເຂົ້າ Excel ${unexportedCount>0?`(${unexportedCount})`:''}</button>
+        <button class="btn btn-primary btn-sm" id="send-report-btn" title="ຂຽນທັບຊີດ Excel ໃຫ້ກົງກັບຂໍ້ມູນໃນເວັບທັງໝົດ" ${reportSending||syncCount===0?'disabled':''}>⤴ ສົ່ງເຂົ້າ Excel ${syncCount>0?`(${syncCount})`:''}</button>
       </div>
     </div>
     <div class="radio-row" style="margin-bottom:16px;flex-wrap:wrap;">
@@ -1506,7 +1521,7 @@ function attachHandlers(){
   if(rEndDate) rEndDate.onchange = (e)=>{ rangeEndDate = e.target.value; render(); };
   if(rEndTime) rEndTime.onchange = (e)=>{ rangeEndTime = e.target.value; render(); };
   const sendReportBtn = document.getElementById('send-report-btn');
-  if(sendReportBtn) sendReportBtn.onclick = ()=>{ sendReportToExcel(receivedEntriesForMode()); };
+  if(sendReportBtn) sendReportBtn.onclick = ()=>{ sendReportToExcel(); };
 
   // audit
   const aDate = document.getElementById('a-date');
