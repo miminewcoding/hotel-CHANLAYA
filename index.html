@@ -377,6 +377,7 @@ function migrateState(s){
     if(e.voided===undefined) e.voided=false;
     if(e.paymentType==='now') e.paymentType='cash';
     if(e.guestName===undefined || e.guestName===null) e.guestName='';
+    if(e.exportedToSheet===undefined) e.exportedToSheet=false;
     if(e.bookingId===undefined || e.bookingId===null){
       const match = Object.values(s.bookings).find(b=>b.roomId===e.roomId && b.guestName===e.guestName);
       e.bookingId = match ? match.id : null;
@@ -393,6 +394,12 @@ function payLabel(pt){
   return '-';
 }
 const DIGITAL_PAY_TYPES = ['bcel','ldb','wechat'];
+
+/* ---------------- Excel report export ---------------- */
+const REPORT_ENDPOINT_URL = ''; // paste the Google Apps Script Web App URL here (ends in /exec)
+const REPORT_SECRET = 'LCnAJcARRVF9XG0oSAoBjYNSPwyh_ulj';
+let reportSending = false;
+let reportStatusMsg = '';
 
 /* ---------------- Login gate ---------------- */
 function renderLogin(errorMsg){
@@ -477,6 +484,40 @@ function bookingUnpaid(bookingId){
 }
 function revenueForDate(dateStr){ return state.revenueLog.filter(l=>l.date===dateStr && !l.voided); }
 function revenueForMonth(monthStr){ return state.revenueLog.filter(l=>l.date.slice(0,7)===monthStr && !l.voided); }
+
+async function sendReportToExcel(entries){
+  if(!REPORT_ENDPOINT_URL){ alert('ຍັງບໍ່ໄດ້ຕັ້ງຄ່າລິ້ງ Excel (REPORT_ENDPOINT_URL) — ກະລຸນາແຈ້ງຜູ້ດູແລລະບົບ'); return; }
+  const pending = entries.filter(e=>!e.exportedToSheet);
+  if(pending.length===0){ alert('ບໍ່ມີລາຍການໃໝ່ທີ່ຍັງບໍ່ໄດ້ສົ່ງ ໃນຊ່ວງທີ່ເລືອກ'); return; }
+  pending.sort((a,b)=> (a.date+' '+(a.time||'')).localeCompare(b.date+' '+(b.time||'')));
+  const rows = pending.map(e=>{
+    const pt = entryPaymentType(e);
+    const isDigital = DIGITAL_PAY_TYPES.includes(pt);
+    return {
+      date: fmtDate(e.date), time: e.time||'', room: e.roomId, method: payLabel(pt),
+      transfer: isDigital ? e.amount : 0, cash: pt==='cash' ? e.amount : 0, total: e.amount
+    };
+  });
+  reportSending = true; reportStatusMsg = `ກຳລັງສົ່ງ ${rows.length} ລາຍການ...`; render();
+  try{
+    const res = await fetch(REPORT_ENDPOINT_URL, {
+      method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({token:REPORT_SECRET, rows})
+    });
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error||'unknown error');
+    pending.forEach(e=>{ e.exportedToSheet=true; });
+    await saveState();
+    reportStatusMsg = `ສົ່ງສຳເລັດ ${rows.length} ລາຍການ`;
+    alert(`ສົ່ງເຂົ້າ Excel ສຳເລັດ: ${rows.length} ລາຍການ`);
+  }catch(err){
+    console.error('report export failed', err);
+    reportStatusMsg = '';
+    alert('ສົ່ງບໍ່ສຳເລັດ: ' + (err.message||err));
+  }finally{
+    reportSending = false; render();
+  }
+}
 
 /* ---------------- Actions (all append-only; nothing is ever removed) ---------------- */
 function doGroupCheckin(roomIds, form){
@@ -788,20 +829,30 @@ function reportsEntriesForMode(){
     return key>=startKey && key<=endKey;
   });
 }
+function receivedEntriesForMode(){
+  return reportsEntriesForMode().filter(e=> e.kind==='settle' || entryPaymentType(e)!=='later');
+}
 
 function renderReports(){
   const allEntries = reportsEntriesForMode();
-  const receivedEntries = allEntries.filter(e=> e.kind==='settle' || entryPaymentType(e)!=='later');
+  const receivedEntries = receivedEntriesForMode();
   const laterNewEntries = allEntries.filter(e=> e.kind!=='settle' && entryPaymentType(e)==='later');
   const total = receivedEntries.reduce((s,e)=>s+e.amount,0);
   const cash = receivedEntries.filter(e=>entryPaymentType(e)==='cash').reduce((s,e)=>s+e.amount,0);
   const digital = receivedEntries.filter(e=>DIGITAL_PAY_TYPES.includes(entryPaymentType(e))).reduce((s,e)=>s+e.amount,0);
   const later = laterNewEntries.reduce((s,e)=>s+e.amount,0);
   const roomNights = allEntries.length;
+  const unexportedCount = receivedEntries.filter(e=>!e.exportedToSheet).length;
 
   return `
   <div class="panel">
-    <h2>ລາຍງານລາຍຮັບ</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <h2 style="margin:0;">ລາຍງານລາຍຮັບ</h2>
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${reportStatusMsg ? `<span style="font-size:12px;color:var(--text-mute);">${reportStatusMsg}</span>` : ''}
+        <button class="btn btn-primary btn-sm" id="send-report-btn" ${reportSending||unexportedCount===0?'disabled':''}>⤴ ສົ່ງເຂົ້າ Excel ${unexportedCount>0?`(${unexportedCount})`:''}</button>
+      </div>
+    </div>
     <div class="radio-row" style="margin-bottom:16px;flex-wrap:wrap;">
       <label><input type="radio" name="rmode" value="day" ${reportMode==='day'?'checked':''} id="rmode-day"> ລາຍວັນ</label>
       <label><input type="radio" name="rmode" value="month" ${reportMode==='month'?'checked':''} id="rmode-month"> ລາຍເດືອນ</label>
@@ -835,7 +886,7 @@ function renderReports(){
     ${allEntries.length===0 ? '<div class="empty">ບໍ່ມີລາຍການໃນຊ່ວງນີ້</div>' : `
     <div class="table-scroll">
     <table>
-      <thead><tr><th>ວັນທີ</th><th>ເວລາ</th><th>ຫ້ອງ</th><th>ລູກຄ້າ</th><th>ປະເພດ</th><th>ການຊຳລະ</th><th>ຈຳນວນເງິນ</th></tr></thead>
+      <thead><tr><th>ວັນທີ</th><th>ເວລາ</th><th>ຫ້ອງ</th><th>ລູກຄ້າ</th><th>ປະເພດ</th><th>ການຊຳລະ</th><th>ຈຳນວນເງິນ</th><th>Excel</th></tr></thead>
       <tbody>
         ${allEntries.map(e=>{
           const eb = state.bookings[e.bookingId];
@@ -850,6 +901,7 @@ function renderReports(){
             <td>${kindLabel}${checkedOut?' · ເຊັກເອົາທ໌ແລ້ວ':''}</td>
             <td>${payLabel(entryPaymentType(e))}</td>
             <td>${fmtMoney(e.amount)}</td>
+            <td>${e.exportedToSheet?'✓':''}</td>
           </tr>`;}).join('')}
       </tbody>
     </table>
@@ -1458,6 +1510,8 @@ function attachHandlers(){
   if(rStartTime) rStartTime.onchange = (e)=>{ rangeStartTime = e.target.value; render(); };
   if(rEndDate) rEndDate.onchange = (e)=>{ rangeEndDate = e.target.value; render(); };
   if(rEndTime) rEndTime.onchange = (e)=>{ rangeEndTime = e.target.value; render(); };
+  const sendReportBtn = document.getElementById('send-report-btn');
+  if(sendReportBtn) sendReportBtn.onclick = ()=>{ sendReportToExcel(receivedEntriesForMode()); };
 
   // audit
   const aDate = document.getElementById('a-date');
