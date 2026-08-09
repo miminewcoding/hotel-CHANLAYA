@@ -490,14 +490,9 @@ async function sendReportToExcel(entries){
   const pending = entries.filter(e=>!e.exportedToSheet);
   if(pending.length===0){ alert('ບໍ່ມີລາຍການໃໝ່ທີ່ຍັງບໍ່ໄດ້ສົ່ງ ໃນຊ່ວງທີ່ເລືອກ'); return; }
   pending.sort((a,b)=> (a.date+' '+(a.time||'')).localeCompare(b.date+' '+(b.time||'')));
-  const rows = pending.map(e=>{
-    const pt = entryPaymentType(e);
-    const isDigital = DIGITAL_PAY_TYPES.includes(pt);
-    return {
-      date: fmtDate(e.date), time: e.time||'', room: e.roomId, method: payLabel(pt),
-      transfer: isDigital ? e.amount : 0, cash: pt==='cash' ? e.amount : 0, total: e.amount
-    };
-  });
+  const rows = pending.map(e=>({
+    date: fmtDate(e.date), time: e.time||'', room: e.roomId, method: payLabel(entryPaymentType(e)), total: e.amount
+  }));
   reportSending = true; reportStatusMsg = `ກຳລັງສົ່ງ ${rows.length} ລາຍການ...`; render();
   try{
     const res = await fetch(REPORT_ENDPOINT_URL, {
