@@ -353,6 +353,7 @@ let auditDate = yesterdayStr();
 let auditCashInput = '';
 let selectMode = false;
 let selectedRooms = [];
+let showBedSummary = false;
 
 function fmtMoney(n){ return Number(n||0).toLocaleString('en-US') + ' ₭'; }
 function fmtDate(iso){ if(!iso) return '-'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}`; }
@@ -680,18 +681,28 @@ function renderGrid(){
   const availSel = selectedRooms.filter(id=>{ const r=state.rooms.find(x=>x.id===id); return r && r.status==='available'; });
   const occSel = selectedRooms.filter(id=>{ const r=state.rooms.find(x=>x.id===id); return r && r.status==='occupied'; });
   const mixed = availSel.length>0 && occSel.length>0;
+  const singleCount = state.rooms.filter(r=>r.type==='single').length;
+  const twinCount = state.rooms.filter(r=>r.type==='twin').length;
   const toolbar = `
-    <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
-      ${selectMode ? `
-        <span style="font-size:13px;color:var(--text-mute);">ເລືອກແລ້ວ ${selectedRooms.length} ຫ້ອງ</span>
-        ${mixed ? `<span style="font-size:12px;color:var(--occupied);">ກະລຸນາເລືອກຫ້ອງສະຖານະດຽວກັນ (ວ່າງ ຫຼື ມີແຂກພັກ)</span>` : ''}
-        ${!mixed && availSel.length>0 ? `<button class="btn btn-primary btn-sm" id="confirm-select">ຕື່ມຂໍ້ມູນເຊັກອິນ</button>` : ''}
-        ${!mixed && occSel.length>0 ? `<button class="btn btn-primary btn-sm" id="confirm-bill">ລວມບິນ</button>` : ''}
-        <button class="btn btn-ghost btn-sm" id="cancel-select">ຍົກເລີກ</button>
-      ` : `
-        <button class="btn btn-ghost btn-sm" id="toggle-select">☑ ເລືອກຫຼາຍຫ້ອງ (ອົງກອນ / ລວມບິນ)</button>
-      `}
-    </div>`;
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:${showBedSummary?'12px':'18px'};flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" id="toggle-bed-summary">${showBedSummary?'▲':'▼'} ຈຳນວນຕຽງ</button>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        ${selectMode ? `
+          <span style="font-size:13px;color:var(--text-mute);">ເລືອກແລ້ວ ${selectedRooms.length} ຫ້ອງ</span>
+          ${mixed ? `<span style="font-size:12px;color:var(--occupied);">ກະລຸນາເລືອກຫ້ອງສະຖານະດຽວກັນ (ວ່າງ ຫຼື ມີແຂກພັກ)</span>` : ''}
+          ${!mixed && availSel.length>0 ? `<button class="btn btn-primary btn-sm" id="confirm-select">ຕື່ມຂໍ້ມູນເຊັກອິນ</button>` : ''}
+          ${!mixed && occSel.length>0 ? `<button class="btn btn-primary btn-sm" id="confirm-bill">ລວມບິນ</button>` : ''}
+          <button class="btn btn-ghost btn-sm" id="cancel-select">ຍົກເລີກ</button>
+        ` : `
+          <button class="btn btn-ghost btn-sm" id="toggle-select">☑ ເລືອກຫຼາຍຫ້ອງ (ອົງກອນ / ລວມບິນ)</button>
+        `}
+      </div>
+    </div>
+    ${showBedSummary ? `
+    <div class="stat-row" style="margin-bottom:18px;">
+      <div class="stat"><div class="label">ຫ້ອງຕຽງດ່ຽວ</div><div class="value num">${singleCount}</div></div>
+      <div class="stat"><div class="label">ຫ້ອງຕຽງຄູ່</div><div class="value num">${twinCount}</div></div>
+    </div>` : ''}`;
   return toolbar + [2,3].map(floor=>{
     const rooms = state.rooms.filter(r=>r.floor===floor);
     return `
@@ -1367,6 +1378,8 @@ function attachHandlers(){
     };
   });
 
+  const toggleBedSummaryBtn = document.getElementById('toggle-bed-summary');
+  if(toggleBedSummaryBtn) toggleBedSummaryBtn.onclick = ()=>{ showBedSummary=!showBedSummary; render(); };
   const toggleSelectBtn = document.getElementById('toggle-select');
   if(toggleSelectBtn) toggleSelectBtn.onclick = ()=>{ selectMode=true; selectedRooms=[]; render(); };
   const cancelSelectBtn = document.getElementById('cancel-select');
