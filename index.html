@@ -490,9 +490,10 @@ function bookingUnpaid(bookingId){
 function revenueForDate(dateStr){ return state.revenueLog.filter(l=>l.date===dateStr && !l.voided); }
 function revenueForMonth(monthStr){ return state.revenueLog.filter(l=>l.date.slice(0,7)===monthStr && !l.voided); }
 
-// Every send rewrites the sheet from the complete log rather than appending the new rows, so a
-// cancelled check-in (voided, hence missing here) disappears from the sheet instead of lingering.
-// Deliberately ignores the selected report period: the sheet mirrors everything, not one range.
+// The site always sends its full list of active (non-voided) received entries; the sheet matches
+// each row to one of these by id, leaving already-present rows untouched (so hand-edits made
+// directly in the sheet survive) and only adding new ones or deleting ones that dropped off this
+// list (cancelled bookings). Deliberately ignores the selected report period: this list is everything.
 function entriesToSync(){
   return state.revenueLog
     .filter(e=> !e.voided && (e.kind==='settle' || entryPaymentType(e)!=='later'))
@@ -506,7 +507,7 @@ async function sendReportToExcel(){
   const rows = entries.map(e=>{
     const pt = entryPaymentType(e);
     return {
-      date: fmtDate(e.date), iso: e.date, time: e.time||'', room: e.roomId,
+      id: e.id, date: fmtDate(e.date), iso: e.date, time: e.time||'', room: e.roomId,
       method: payLabel(pt), total: e.amount,
       // Classify here, where the payment type is known, so the sheet never re-derives it from labels.
       pay: pt==='cash' ? 'cash' : (DIGITAL_PAY_TYPES.includes(pt) ? 'transfer' : 'other')
@@ -516,7 +517,7 @@ async function sendReportToExcel(){
   try{
     const res = await fetch(REPORT_ENDPOINT_URL, {
       method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({token:REPORT_SECRET, mode:'replace', rows})
+      body: JSON.stringify({token:REPORT_SECRET, rows})
     });
     const data = await res.json();
     if(!data.ok) throw new Error(data.error||'unknown error');
@@ -524,7 +525,7 @@ async function sendReportToExcel(){
     state.revenueLog.forEach(e=>{ e.exportedToSheet = sentIds.has(e.id); });
     await saveState();
     reportStatusMsg = `ສົ່ງສຳເລັດ ${rows.length} ລາຍການ`;
-    alert(`ສົ່ງເຂົ້າ Excel ສຳເລັດ: ${rows.length} ລາຍການ`);
+    alert(`ສົ່ງເຂົ້າ Excel ສຳເລັດ: ${data.added||0} ລາຍການໃໝ່, ${data.removed||0} ລາຍການທີ່ຍົກເລີກຖືກລຶບ`);
   }catch(err){
     console.error('report export failed', err);
     reportStatusMsg = '';
