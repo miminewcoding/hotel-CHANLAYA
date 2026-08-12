@@ -586,6 +586,16 @@ async function sendReportToExcel(){
 }
 
 /* ---------------- Actions (all append-only; nothing is ever removed) ---------------- */
+// Splits a multi-night charge into one revenueLog entry per night, dated the night it actually
+// covers -- so daily reports (ລາຍງານ) show this room's revenue on every date of the stay, not
+// lumped onto whichever day it happened to be logged.
+function pushNightlyRevenue(bookingId, roomId, guestName, startDate, nights, pricePerNight, time, paymentType, kind){
+  for(let i=0;i<nights;i++){
+    state.revenueLog.push({id:uid(), bookingId, date:addDays(startDate,i), time, roomId, guestName, amount:pricePerNight,
+      paymentType, kind, voided:false});
+  }
+}
+
 function doGroupCheckin(roomIds, form){
   const ciDate = form.ciDate || todayStr();
   const time = nowTimeStr();
@@ -606,8 +616,7 @@ function doGroupCheckin(roomIds, form){
     };
     room.status = 'occupied';
     room.bookingId = bookingId;
-    state.revenueLog.push({id:uid(), bookingId, date:ciDate, time, roomId, guestName:form.guestName||'', amount: total,
-      paymentType: form.paymentType||'cash', kind:'checkin', voided:false});
+    pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, time, form.paymentType||'cash', 'checkin');
   });
   saveState();
 }
@@ -629,8 +638,7 @@ function doCheckin(roomId, form){
   };
   room.status = 'occupied';
   room.bookingId = bookingId;
-  state.revenueLog.push({id:uid(), bookingId, date:ciDate, time:nowTimeStr(), roomId, guestName:form.guestName||'', amount: total,
-    paymentType: form.paymentType||'cash', kind:'checkin', voided:false});
+  pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, nowTimeStr(), form.paymentType||'cash', 'checkin');
   saveState();
   modal=null; render();
 }
@@ -638,13 +646,11 @@ function doCheckin(roomId, form){
 function doAddNights(roomId, bookingId, extraNights, paymentType, keepModal){
   const b = state.bookings[bookingId];
   const n = Math.max(1, parseInt(extraNights,10)||1);
-  const amount = n * b.pricePerNight;
+  const currentDue = addDays(b.checkInDate, b.nights); // capture before nights is mutated below
   b.nights += n;
-  b.totalPrice += amount;
+  b.totalPrice += n * b.pricePerNight;
   b.overdueNotified = false; // due date just moved out; allow it to notify again if it passes
-  const today = todayStr();
-  state.revenueLog.push({id:uid(), bookingId, date:today, time:nowTimeStr(), roomId, guestName:b.guestName, amount,
-    paymentType, kind:'addnights', voided:false});
+  pushNightlyRevenue(bookingId, roomId, b.guestName, currentDue, n, b.pricePerNight, nowTimeStr(), paymentType, 'addnights');
   saveState();
   if(!keepModal) modal=null;
   render(); checkOverdueNotification();
@@ -700,15 +706,15 @@ function doSaveEdit(bookingId, fields){
   // changing nights without this would leave "unpaid" showing the old, wrong figure forever.
   if(fields.nights!==undefined && fields.nights!==b.nights){
     const newTotal = fields.nights * b.pricePerNight;
-    const delta = newTotal - b.totalPrice;
     fields.totalPrice = newTotal;
-    if(delta > 0){
-      state.revenueLog.push({id:uid(), bookingId, date:todayStr(), time:nowTimeStr(), roomId:b.roomId,
-        guestName:b.guestName, amount:delta, paymentType:'later', kind:'addnights', voided:false});
+    if(fields.nights > b.nights){
+      const anchorCheckIn = fields.checkInDate || b.checkInDate;
+      pushNightlyRevenue(bookingId, b.roomId, b.guestName, addDays(anchorCheckIn, b.nights), fields.nights-b.nights,
+        b.pricePerNight, nowTimeStr(), 'later', 'addnights');
     }
-    // delta < 0 (nights reduced): totalPrice is corrected below, but no revenueLog entry is removed
-    // or negated automatically -- that could erase money actually collected. Staff must void/adjust
-    // the relevant old entry by hand if this correction means less was really owed.
+    // nights reduced: totalPrice is corrected below, but no revenueLog entry is removed or negated
+    // automatically -- that could erase money actually collected. Staff must void/adjust the
+    // relevant old entry by hand if this correction means less was really owed.
   }
   Object.assign(b, fields);
   if(fields.paymentType && fields.paymentType !== oldPaymentType){
