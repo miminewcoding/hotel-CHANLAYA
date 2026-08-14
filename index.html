@@ -359,32 +359,21 @@ function nowLiveLabel(){
 function isOverdueBooking(b){
   return !!b && !b.voided && addDays(b.checkInDate, b.nights) < todayStr();
 }
-// Recomputed live everywhere it's used (never cached on `modal`), so the overdue list modal and
-// the room grid badges always reflect the current state even while a list is sitting open.
+// Recomputed live everywhere it's used (never cached on `modal`), so the room grid badges always
+// reflect the current state.
 function overdueRoomsList(){
   return state.rooms
     .filter(r=>r.status==='occupied' && isOverdueBooking(state.bookings[r.bookingId]))
     .map(r=>({room:r, b:state.bookings[r.bookingId]}));
 }
-// Fires once per booking per overdue period (gated by b.overdueNotified, cleared on the next
-// add-nights) -- shows every overdue room together in one list instead of one popup at a time.
-// The room grid badge is what keeps reminding staff after this, so it never has to nag on a timer.
-function checkOverdueNotification(){
-  if(modal) return; // don't interrupt whatever the staff is already doing
-  if(new Date().getHours() < 13) return;
-  const pending = overdueRoomsList().filter(x=>!x.b.overdueNotified);
-  if(!pending.length) return;
-  pending.forEach(x=>{ x.b.overdueNotified = true; });
-  saveState();
-  modal = {type:'overdueList'};
-  render();
-}
-// Silent background fallback: if a room is still overdue at/after 15:00 (staff never acted on the
-// 13:00 notice), extend it by one night as ຈ່າຍພາຍຫຼັງ so the room stops sitting in limbo. This can
-// only fire once per day per booking -- extending moves the due date to exactly today, so
-// isOverdueBooking goes false immediately and the next tick finds nothing to do for that room.
+// Silent background action: at/after 13:00, any room still overdue gets extended by one night as
+// ຈ່າຍພາຍຫຼັງ automatically -- no staff click required. This can only fire once per day per booking
+// -- extending moves the due date to exactly today, so isOverdueBooking goes false immediately and
+// the next tick finds nothing to do for that room. The room grid badge (autoExtendedPending) is
+// what tells staff this happened, so they can correct it via the edit-dates form if the guest
+// actually already left.
 function autoExtendOverdueRooms(){
-  if(new Date().getHours() < 15) return;
+  if(new Date().getHours() < 13) return;
   overdueRoomsList().forEach(({room,b})=>{
     b.autoExtendedPending = true; // cleared when staff opens the room -- a prompt to double-check it
     doAddNights(room.id, b.id, 1, 'later', true);
@@ -425,7 +414,6 @@ function migrateState(s){
     if(b.checkOutTime===undefined) b.checkOutTime='';
     if(b.paymentType==='now') b.paymentType='cash';
     if(b.guestName===undefined || b.guestName===null) b.guestName='';
-    if(b.overdueNotified===undefined) b.overdueNotified=false;
     if(b.autoExtendedPending===undefined) b.autoExtendedPending=false;
   });
   s.revenueLog.forEach(e=>{
@@ -506,7 +494,7 @@ async function loadState(){
       setDoc(STATE_DOC, state).catch(e=>console.error('init failed', e));
     }
     firestoreReady = true;
-    render(); checkOverdueNotification(); autoExtendOverdueRooms();
+    render(); autoExtendOverdueRooms();
   }, (err)=>{
     console.error('Firestore connection failed, using local copy', err);
     if(!firestoreReady){
@@ -515,7 +503,7 @@ async function loadState(){
         state = raw ? migrateState(JSON.parse(raw)) : defaultState();
       }catch(e){ state = defaultState(); }
       firestoreReady = true;
-      render(); checkOverdueNotification(); autoExtendOverdueRooms();
+      render(); autoExtendOverdueRooms();
     }
   });
 }
@@ -609,14 +597,14 @@ function doGroupCheckin(roomIds, form){
     state.bookings[bookingId] = {
       id:bookingId, roomId, staffName:form.receiverName||'', guestName:form.guestName||'',
       gender:form.gender||'', docNumber:form.docNumber||'', nationality:form.nationality||'', phone:form.phone||'',
-      nights, pricePerNight:price, totalPrice:total, paymentType:form.paymentType||'cash',
+      nights, pricePerNight:price, totalPrice:total, paymentType:form.paymentType||'later',
       wechatAmount: form.paymentType==='wechat' ? (form.wechatAmount||'') : '',
       checkInDate: ciDate, checkInTime: time, checkOutDate: null, checkOutTime:'', voided:false, groupId,
-      overdueNotified:false, autoExtendedPending:false
+      autoExtendedPending:false
     };
     room.status = 'occupied';
     room.bookingId = bookingId;
-    pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, time, form.paymentType||'cash', 'checkin');
+    pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, time, form.paymentType||'later', 'checkin');
   });
   saveState();
 }
@@ -631,14 +619,14 @@ function doCheckin(roomId, form){
   state.bookings[bookingId] = {
     id:bookingId, roomId, staffName:form.receiverName||'', guestName:form.guestName||'',
     gender:form.gender||'', docNumber:form.docNumber||'', nationality:form.nationality||'', phone:form.phone||'',
-    nights, pricePerNight:price, totalPrice:total, paymentType:form.paymentType||'cash',
+    nights, pricePerNight:price, totalPrice:total, paymentType:form.paymentType||'later',
     wechatAmount: form.paymentType==='wechat' ? (form.wechatAmount||'') : '',
     checkInDate: ciDate, checkInTime: nowTimeStr(), checkOutDate: null, checkOutTime:'', voided:false,
-    overdueNotified:false, autoExtendedPending:false
+    autoExtendedPending:false
   };
   room.status = 'occupied';
   room.bookingId = bookingId;
-  pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, nowTimeStr(), form.paymentType||'cash', 'checkin');
+  pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, nowTimeStr(), form.paymentType||'later', 'checkin');
   saveState();
   modal=null; render();
 }
@@ -649,11 +637,10 @@ function doAddNights(roomId, bookingId, extraNights, paymentType, keepModal){
   const currentDue = addDays(b.checkInDate, b.nights); // capture before nights is mutated below
   b.nights += n;
   b.totalPrice += n * b.pricePerNight;
-  b.overdueNotified = false; // due date just moved out; allow it to notify again if it passes
   pushNightlyRevenue(bookingId, roomId, b.guestName, currentDue, n, b.pricePerNight, nowTimeStr(), paymentType, 'addnights');
   saveState();
   if(!keepModal) modal=null;
-  render(); checkOverdueNotification();
+  render();
 }
 
 function doSettlePayment(roomId, bookingId, method){
@@ -675,7 +662,7 @@ function doCheckout(roomId, bookingId, keepModal){
   room.status = 'cleaning';
   saveState();
   if(!keepModal) modal=null;
-  render(); checkOverdueNotification();
+  render();
 }
 
 function doUndoCheckout(roomId){
@@ -684,7 +671,6 @@ function doUndoCheckout(roomId){
   if(!b) return;
   b.checkOutDate = null;
   b.checkOutTime = '';
-  b.overdueNotified = false;
   room.status = 'occupied';
   saveState();
   modal=null; render();
@@ -707,14 +693,25 @@ function doSaveEdit(bookingId, fields){
   if(fields.nights!==undefined && fields.nights!==b.nights){
     const newTotal = fields.nights * b.pricePerNight;
     fields.totalPrice = newTotal;
+    fields.autoExtendedPending = false; // either direction means this booking's dates are now settled
+    const anchorCheckIn = fields.checkInDate || b.checkInDate;
     if(fields.nights > b.nights){
-      const anchorCheckIn = fields.checkInDate || b.checkInDate;
       pushNightlyRevenue(bookingId, b.roomId, b.guestName, addDays(anchorCheckIn, b.nights), fields.nights-b.nights,
         b.pricePerNight, nowTimeStr(), 'later', 'addnights');
+    } else {
+      // Fewer nights than logged means the guest actually left already. If this room is still this
+      // booking's live occupant, treat the correction as the real checkout instead of leaving the
+      // room stuck showing "occupied" for a stay that's already over.
+      const room = state.rooms.find(r=>r.id===b.roomId);
+      if(room && room.bookingId===bookingId && room.status==='occupied'){
+        fields.checkOutDate = addDays(anchorCheckIn, fields.nights);
+        fields.checkOutTime = '';
+        room.status = 'cleaning';
+      }
+      // Either way, no revenueLog entry is removed or negated automatically -- that could erase
+      // money actually collected. Staff must void/adjust the relevant old entry by hand if this
+      // correction means less was really owed.
     }
-    // nights reduced: totalPrice is corrected below, but no revenueLog entry is removed or negated
-    // automatically -- that could erase money actually collected. Staff must void/adjust the
-    // relevant old entry by hand if this correction means less was really owed.
   }
   Object.assign(b, fields);
   if(fields.paymentType && fields.paymentType !== oldPaymentType){
@@ -1077,38 +1074,7 @@ function renderModal(){
   if(modal.type==='cleaning') return renderCleaningModal();
   if(modal.type==='editBooking') return renderEditModal();
   if(modal.type==='groupBill') return renderGroupBillModal();
-  if(modal.type==='overdueList') return renderOverdueListModal();
   return '';
-}
-
-function renderOverdueListModal(){
-  const items = overdueRoomsList();
-  return `
-  <div class="modal-overlay" id="overlay">
-    <div class="modal">
-      <button class="modal-close" id="m-close">✕</button>
-      <h2>⚠️ ຫ້ອງທີ່ເກີນກຳນົດ Check-out (${items.length})</h2>
-      ${items.length ? `
-      <div class="table-scroll">
-      <table>
-        <thead><tr><th>ຫ້ອງ</th><th>ຊື່ລູກຄ້າ</th><th>ວັນ Check-out (ຄາດ)</th><th></th></tr></thead>
-        <tbody>
-          ${items.map(({room,b})=>`
-          <tr>
-            <td><a href="#" data-open-room="${room.id}" class="num">${room.id}</a></td>
-            <td>${b.guestName}</td>
-            <td>${fmtDate(addDays(b.checkInDate,b.nights))}</td>
-            <td style="white-space:nowrap;">
-              <button class="btn btn-primary btn-sm" data-quick-add="${room.id}">+1 ຄືນ</button>
-              <button class="btn btn-danger btn-sm" data-quick-checkout="${room.id}">Check-out</button>
-            </td>
-          </tr>`).join('')}
-        </tbody>
-      </table>
-      </div>` : `<p>ບໍ່ມີຫ້ອງທີ່ເກີນກຳນົດແລ້ວ</p>`}
-      <div class="btn-row"><button class="btn btn-ghost" id="m-cancel">ປິດ</button></div>
-    </div>
-  </div>`;
 }
 
 function renderCheckinModal(){
@@ -1280,6 +1246,9 @@ function renderOccupiedModal(){
   const extraNights = daysBetween(currentDue, modal.targetCheckout);
   const unpaid = bookingUnpaid(b.id);
   if(!modal.settleMethod) modal.settleMethod = 'cash';
+  const editCI = modal.editCheckIn || b.checkInDate;
+  const editCO = modal.editCheckOut || currentDue;
+  const editNights = daysBetween(editCI, editCO);
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1305,17 +1274,26 @@ function renderOccupiedModal(){
           <div class="field">
             <label>ການຊຳລະເງິນສ່ວນເພີ່ມ</label>
             <div class="radio-row">
-              <label><input type="radio" name="paye" value="cash" id="e-pay-cash" ${modal.extraPay==='cash'||!modal.extraPay?'checked':''}> ຈ່າຍສົດ</label>
+              <label><input type="radio" name="paye" value="cash" id="e-pay-cash" ${modal.extraPay==='cash'?'checked':''}> ຈ່າຍສົດ</label>
               <label><input type="radio" name="paye" value="bcel" id="e-pay-bcel" ${modal.extraPay==='bcel'?'checked':''}> BCEL</label>
               <label><input type="radio" name="paye" value="ldb" id="e-pay-ldb" ${modal.extraPay==='ldb'?'checked':''}> LDB</label>
               <label><input type="radio" name="paye" value="wechat" id="e-pay-wechat" ${modal.extraPay==='wechat'?'checked':''}> WeChat</label>
-              <label><input type="radio" name="paye" value="later" id="e-pay-later" ${modal.extraPay==='later'?'checked':''}> ຈ່າຍພາຍຫຼັງ</label>
+              <label><input type="radio" name="paye" value="later" id="e-pay-later" ${modal.extraPay==='later'||!modal.extraPay?'checked':''}> ຈ່າຍພາຍຫຼັງ</label>
             </div>
           </div>
         </div>
         <div class="btn-row">
           <button class="btn btn-primary" id="m-addnights" ${extraNights>0?'':'disabled'}>ເພີ່ມຄືນ ແລະ ບັນທຶກຊຳລະເງິນ</button>
         </div>
+      </div>
+      <div class="panel" style="box-shadow:none;border:1px solid var(--paper-line);padding:16px 18px;margin-top:16px;">
+        <h2 style="font-size:15px;">ແກ້ໄຂວັນທີເຊັກອິນ/ເຊັກເອົາທ໌ຍ້ອນຫຼັງ</h2>
+        <div class="field-grid">
+          <div class="field"><label>ວັນທີເຊັກອິນ</label><input type="date" id="oc-checkin" value="${editCI}"></div>
+          <div class="field"><label>ວັນທີເຊັກເອົາທ໌ ${editNights>0?`(= ${editNights} ຄືນ)`:'(ຜິດ)'}</label><input type="date" id="oc-checkout" value="${editCO}"></div>
+        </div>
+        <p style="font-size:11px;color:var(--text-mute);">ຖ້າຫຼຸດຈຳນວນຄືນ ແລະ ຫ້ອງນີ້ຍັງພັກຢູ່ ລະບົບຈະ Check-out ໃຫ້ທັນທີຕາມວັນທີໃໝ່</p>
+        <div class="btn-row"><button class="btn btn-primary" id="m-save-dates" ${editNights>0?'':'disabled'}>ບັນທຶກວັນທີ</button></div>
       </div>
       ${unpaid>0 ? `<div class="alert info">ຫ້ອງນີ້ຍັງມີຍອດຄ້າງຊຳລະ ${fmtMoney(unpaid)} — ເລືອກຊ່ອງທາງແລ້ວກົດຊຳລະ ກ່ອນ Check-out ຖ້າລູກຄ້າຈ່າຍແລ້ວ</div>` : ''}
       ${unpaid>0 ? `<div class="field-grid" style="margin-bottom:8px;"><div class="field"><label>ຊຳລະຄ້າງດ້ວຍຊ່ອງທາງໃດ</label>
@@ -1556,13 +1534,13 @@ function attachHandlers(){
         return;
       }
       if(room.status==='available'){
-        modal = {type:'checkin', roomId:room.id, form:{nights:1, price:room.price, paymentType:'cash', receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1)}};
+        modal = {type:'checkin', roomId:room.id, form:{nights:1, price:room.price, paymentType:'later', receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1)}};
       } else if(room.status==='occupied'){
         const b = state.bookings[room.bookingId];
         const overdue = isOverdueBooking(b);
         const autoExtended = !!b.autoExtendedPending;
         if(autoExtended){ b.autoExtendedPending = false; saveState(); }
-        modal = {type:'occupied', roomId:room.id, targetCheckout:addDays(b.checkInDate,b.nights+1), extraPay:'cash', overdueNotice:overdue, autoExtendNotice:autoExtended};
+        modal = {type:'occupied', roomId:room.id, targetCheckout:addDays(b.checkInDate,b.nights+1), extraPay:'later', overdueNotice:overdue, autoExtendNotice:autoExtended};
       } else {
         modal = {type:'cleaning', roomId:room.id};
       }
@@ -1579,7 +1557,7 @@ function attachHandlers(){
   const confirmSelectBtn = document.getElementById('confirm-select');
   if(confirmSelectBtn) confirmSelectBtn.onclick = ()=>{
     if(selectedRooms.length===0) return;
-    modal = {type:'groupCheckin', roomIds:[...selectedRooms], form:{nights:1, paymentType:'cash', receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1), prices:{}}};
+    modal = {type:'groupCheckin', roomIds:[...selectedRooms], form:{nights:1, paymentType:'later', receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1), prices:{}}};
     render();
   };
   const confirmBillBtn = document.getElementById('confirm-bill');
@@ -1668,29 +1646,6 @@ function attachHandlers(){
   const mCancel = document.getElementById('m-cancel');
   if(mCancel) mCancel.onclick = ()=>{ modal=null; render(); };
 
-  if(modal && modal.type==='overdueList'){
-    document.querySelectorAll('[data-open-room]').forEach(el=>{
-      el.onclick = (e)=>{
-        e.preventDefault();
-        const room = state.rooms.find(r=>r.id===Number(el.dataset.openRoom));
-        const b = state.bookings[room.bookingId];
-        modal = {type:'occupied', roomId:room.id, targetCheckout:addDays(b.checkInDate,b.nights+1), extraPay:'cash', overdueNotice:true};
-        render();
-      };
-    });
-    document.querySelectorAll('[data-quick-add]').forEach(el=>{
-      el.onclick = ()=>{
-        const room = state.rooms.find(r=>r.id===Number(el.dataset.quickAdd));
-        doAddNights(room.id, room.bookingId, 1, 'cash', true);
-      };
-    });
-    document.querySelectorAll('[data-quick-checkout]').forEach(el=>{
-      el.onclick = ()=>{
-        const room = state.rooms.find(r=>r.id===Number(el.dataset.quickCheckout));
-        doCheckout(room.id, room.bookingId, true);
-      };
-    });
-  }
 
   if(modal && modal.type==='checkin'){
     const recSel = document.getElementById('f-receiver');
@@ -1800,7 +1755,21 @@ function attachHandlers(){
       const b = state.bookings[room.bookingId];
       const n = daysBetween(addDays(b.checkInDate,b.nights), modal.targetCheckout);
       if(n < 1){ alert('ວັນທີຕ້ອງຫຼັງວັນຄາດເຊັກເອົາທ໌ປັດຈຸບັນ'); return; }
-      doAddNights(modal.roomId, room.bookingId, n, modal.extraPay||'cash');
+      doAddNights(modal.roomId, room.bookingId, n, modal.extraPay||'later');
+    };
+    const ociCheckin = document.getElementById('oc-checkin');
+    const ociCheckout = document.getElementById('oc-checkout');
+    if(ociCheckin) ociCheckin.onchange = ()=>{ modal.editCheckIn = ociCheckin.value; render(); };
+    if(ociCheckout) ociCheckout.onchange = ()=>{ modal.editCheckOut = ociCheckout.value; render(); };
+    const saveDatesBtn = document.getElementById('m-save-dates');
+    if(saveDatesBtn) saveDatesBtn.onclick = ()=>{
+      const room = state.rooms.find(r=>r.id===modal.roomId);
+      const b = state.bookings[room.bookingId];
+      const ci = modal.editCheckIn || b.checkInDate;
+      const co = modal.editCheckOut || addDays(b.checkInDate,b.nights);
+      const n = daysBetween(ci, co);
+      if(n < 1){ alert('ວັນທີເຊັກເອົາທ໌ຕ້ອງຫຼັງວັນທີເຊັກອິນຢ່າງໜ້ອຍ 1 ຄືນ'); return; }
+      doSaveEdit(room.bookingId, {checkInDate:ci, nights:n});
     };
     const settleMethodEl = document.getElementById('settle-method');
     if(settleMethodEl) settleMethodEl.onchange = ()=>{ modal.settleMethod = settleMethodEl.value; };
@@ -1901,7 +1870,7 @@ setInterval(()=>{
   const el = document.getElementById('live-clock');
   if(el) el.textContent = nowLiveLabel();
 }, 30000);
-setInterval(()=>{ if(state){ checkOverdueNotification(); autoExtendOverdueRooms(); } }, 5*60*1000);
+setInterval(()=>{ if(state) autoExtendOverdueRooms(); }, 5*60*1000);
 </script>
 </body>
 </html>
