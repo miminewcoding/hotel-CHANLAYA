@@ -890,6 +890,15 @@ function bookingExcelStatus(bookingId){
   if(!entries.length) return '';
   return entries.every(e=>e.exportedToSheet) ? '✓' : '';
 }
+// b.paymentType is just what the booking started as -- a per-night settle (doSettlePayment) can
+// leave individual nights paid by a different method without ever touching that field, so read the
+// actual entries instead of the stale booking-level value.
+function bookingPaymentSummary(bookingId){
+  const entries = state.revenueLog.filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights'));
+  if(!entries.length) return '-';
+  const types = [...new Set(entries.map(e=>entryPaymentType(e)))];
+  return types.length===1 ? payLabel(types[0]) : 'ຫຼາຍຊ່ອງທາງ';
+}
 function renderSearch(){
   const results = Object.values(state.bookings).filter(b=>{
     const nameOk = !searchQuery.name || (b.guestName||'').toLowerCase().includes(searchQuery.name.toLowerCase());
@@ -928,7 +937,7 @@ function renderSearch(){
             <td>${b.nights}</td>
             <td>${fmtMoney(b.totalPrice)}</td>
             <td>${unpaid>0?fmtMoney(unpaid):'-'}</td>
-            <td>${payLabel(b.paymentType)}</td>
+            <td>${bookingPaymentSummary(b.id)}</td>
             <td class="num">${bookingExcelStatus(b.id)}</td>
             <td>${b.voided?'<span class="badge void">ຍົກເລີກແລ້ວ</span>':'<span class="badge active">ໃຊ້ງານ</span>'}</td>
             <td class="row-actions">
