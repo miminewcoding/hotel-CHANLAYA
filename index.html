@@ -694,17 +694,27 @@ function doSaveEdit(bookingId, fields){
     const newTotal = fields.nights * b.pricePerNight;
     fields.totalPrice = newTotal;
     fields.autoExtendedPending = false; // either direction means this booking's dates are now settled
+    const anchorCheckIn = fields.checkInDate || b.checkInDate;
     if(fields.nights > b.nights){
-      const anchorCheckIn = fields.checkInDate || b.checkInDate;
       pushNightlyRevenue(bookingId, b.roomId, b.guestName, addDays(anchorCheckIn, b.nights), fields.nights-b.nights,
         b.pricePerNight, nowTimeStr(), 'later', 'addnights');
+    } else {
+      // Fewer nights than logged, most often correcting a wrong 13:00 auto-extend after the guest
+      // had actually already left. A shorter stay whose room is still marked 'occupied' would just
+      // read as overdue again and get auto-extended right back on the next tick -- so this has to
+      // be a real checkout, not just a number correction, for "the auto system won't touch it
+      // again" to actually hold. Only does this if the room is still this exact booking's live
+      // occupant, so it can never touch a room already re-let to someone else.
+      const room = state.rooms.find(r=>r.id===b.roomId);
+      if(room && room.bookingId===bookingId && room.status==='occupied'){
+        fields.checkOutDate = addDays(anchorCheckIn, fields.nights);
+        fields.checkOutTime = '';
+        room.status = 'cleaning';
+      }
+      // Either way, no revenueLog entry is removed or negated automatically -- that could erase
+      // money actually collected. Staff must void/adjust the relevant old entry by hand if this
+      // correction means less was really owed.
     }
-    // Fewer nights: totalPrice is corrected above only -- this form never touches checkOutDate or
-    // room.status. If the guest genuinely already left, staff still use the normal Check-out button
-    // for that; this field is purely for correcting the night count/total after the fact. No
-    // revenueLog entry is removed or negated automatically either, since that could erase money
-    // actually collected -- staff must void/adjust the relevant old entry by hand if this
-    // correction means less was really owed.
   }
   Object.assign(b, fields);
   if(fields.paymentType && fields.paymentType !== oldPaymentType){
@@ -1285,7 +1295,7 @@ function renderOccupiedModal(){
           <div class="field"><label>ວັນທີເຊັກອິນ</label><input type="date" id="oc-checkin" value="${editCI}"></div>
           <div class="field"><label>ວັນທີເຊັກເອົາທ໌ ${editNights>0?`(= ${editNights} ຄືນ)`:'(ຜິດ)'}</label><input type="date" id="oc-checkout" value="${editCO}"></div>
         </div>
-        <p style="font-size:11px;color:var(--text-mute);">ໃຊ້ແກ້ຈຳນວນຄືນ/ຍອດເງິນເທົ່ານັ້ນ — ຖ້າແຂກອອກຈິງແລ້ວໃຫ້ກົດ Check-out ແຍກຕ່າງຫາກ</p>
+        <p style="font-size:11px;color:var(--text-mute);">ຖ້າຫຼຸດຈຳນວນຄືນ ແລະ ຫ້ອງນີ້ຍັງພັກຢູ່ ລະບົບຈະ Check-out ໃຫ້ທັນທີຕາມວັນທີໃໝ່ (ລະບົບອັດຕະໂນມັດຈະບໍ່ຕໍ່ຄືນໃຫ້ອີກ)</p>
         <div class="btn-row"><button class="btn btn-primary" id="m-save-dates" ${editNights>0?'':'disabled'}>ບັນທຶກວັນທີ</button></div>
       </div>
       ${unpaid>0 ? `<div class="alert info">ຫ້ອງນີ້ຍັງມີຍອດຄ້າງຊຳລະ ${fmtMoney(unpaid)} — ເລືອກຊ່ອງທາງແລ້ວກົດຊຳລະ ກ່ອນ Check-out ຖ້າລູກຄ້າຈ່າຍແລ້ວ</div>` : ''}
