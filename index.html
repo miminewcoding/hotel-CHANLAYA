@@ -394,7 +394,7 @@ function autoExtendOverdueRooms(){
 let state = null;
 let view = 'grid';
 let modal = null;
-let searchQuery = {name:'', room:'', ciDate:'', coDate:'', rangeFrom:'', rangeTo:''};
+let searchQuery = {name:'', room:'', dateType:'checkin', rangeFrom:'', rangeTo:''};
 let reportMonth = todayStr().slice(0,7);
 let reportRangeFrom = '';
 let reportRangeTo = '';
@@ -922,18 +922,17 @@ function renderSearch(){
   const results = Object.values(state.bookings).filter(b=>{
     const nameOk = !searchQuery.name || (b.guestName||'').toLowerCase().includes(searchQuery.name.toLowerCase());
     const roomOk = !searchQuery.room || b.roomId===searchQuery.room;
-    const ciOk = !searchQuery.ciDate || b.checkInDate===searchQuery.ciDate;
-    const coOk = !searchQuery.coDate || b.checkOutDate===searchQuery.coDate;
-    // "ຊ່ວງວັນທີ" is an overlap search (who was staying at any point in this window), not an
-    // exact match -- an ongoing stay (no real checkOutDate yet) falls back to its expected
-    // checkout so it still shows up when the window covers today.
+    // The date range filters on whichever single date field the dropdown picked (check-in or
+    // check-out), not a stay-overlap search -- picking "check-out" and a range shows exactly the
+    // rooms that checked out in that window, matching bookings that haven't actually checked out
+    // (checkOutDate still null) fails on purpose, same as before.
     let rangeOk = true;
     if(searchQuery.rangeFrom || searchQuery.rangeTo){
-      const stayEnd = b.checkOutDate || addDays(b.checkInDate, b.nights);
-      rangeOk = (!searchQuery.rangeTo || b.checkInDate<=searchQuery.rangeTo) &&
-                (!searchQuery.rangeFrom || stayEnd>=searchQuery.rangeFrom);
+      const target = searchQuery.dateType==='checkout' ? b.checkOutDate : b.checkInDate;
+      rangeOk = !!target && (!searchQuery.rangeFrom || target>=searchQuery.rangeFrom) &&
+                (!searchQuery.rangeTo || target<=searchQuery.rangeTo);
     }
-    return nameOk && roomOk && ciOk && coOk && rangeOk;
+    return nameOk && roomOk && rangeOk;
   }).sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
 
   const roomOptions = state.rooms.slice().sort((a,c)=>Number(a.id)-Number(c.id));
@@ -949,8 +948,12 @@ function renderSearch(){
           ${roomOptions.map(r=>`<option value="${r.id}" ${searchQuery.room===r.id?'selected':''}>${r.id}</option>`).join('')}
         </select>
       </div>
-      <div class="field"><label>ວັນທີເຊັກອິນ</label><input id="s-ci" type="date" value="${searchQuery.ciDate}"></div>
-      <div class="field"><label>ວັນທີເຊັກເອົາທ໌</label><input id="s-co" type="date" value="${searchQuery.coDate}"></div>
+      <div class="field"><label>ຄົ້ນຫາຕາມ</label>
+        <select id="s-date-type">
+          <option value="checkin" ${searchQuery.dateType!=='checkout'?'selected':''}>ວັນທີເຊັກອິນ</option>
+          <option value="checkout" ${searchQuery.dateType==='checkout'?'selected':''}>ວັນທີເຊັກເອົາທ໌</option>
+        </select>
+      </div>
       <div class="field"><label>ຊ່ວງວັນທີ ຕັ້ງແຕ່</label><input id="s-range-from" type="date" value="${searchQuery.rangeFrom}"></div>
       <div class="field"><label>ຫາວັນທີ</label><input id="s-range-to" type="date" value="${searchQuery.rangeTo}"></div>
       <div class="field" style="justify-content:flex-end;"><button class="btn btn-primary" id="s-run">ຄົ້ນຫາ</button></div>
@@ -963,7 +966,7 @@ function renderSearch(){
     ${results.length===0 ? '<div class="empty">ບໍ່ພົບຂໍ້ມູນ</div>' : `
     <div class="table-scroll">
     <table>
-      <thead><tr><th>ວັນທີເຊັກອິນ</th><th>ວັນທີເຊັກເອົາທ໌</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ເບີໂທ</th><th>ເລກບັດ/ພາສປອດ</th><th>ການຊຳລະ</th><th>ຈັດການ</th></tr></thead>
+      <thead><tr><th>ວັນທີເຊັກອິນ</th><th>ວັນທີເຊັກເອົາທ໌</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ເບີໂທ</th><th>ສະຖານະ</th><th>ເລກບັດ/ພາສປອດ</th><th>ການຊຳລະ</th><th>ຈັດການ</th></tr></thead>
       <tbody>
         ${results.map(b=>{
           const unpaid = bookingUnpaid(b.id);
@@ -974,6 +977,7 @@ function renderSearch(){
             <td>${b.guestName||'-'} ${b.voided?'<span class="badge void" style="margin-left:6px;">ຍົກເລີກແລ້ວ</span>':''}</td>
             <td class="num">${b.roomId}</td>
             <td>${b.phone||'-'}</td>
+            <td>${b.checkOutDate?'ອອກແລ້ວ':'ພັກຢູ່'}</td>
             <td>${b.docNumber||'-'}</td>
             <td>${unpaid>0?`<span class="badge void">ຄ້າງ ${fmtMoney(unpaid)}</span>`:`<span class="badge active">ຈ່າຍຄົບແລ້ວ</span>`}</td>
             <td class="row-actions">
@@ -1586,8 +1590,7 @@ function attachHandlers(){
   const runSearch = ()=>{
     searchQuery.name = document.getElementById('s-name')?.value || '';
     searchQuery.room = document.getElementById('s-room')?.value || '';
-    searchQuery.ciDate = document.getElementById('s-ci')?.value || '';
-    searchQuery.coDate = document.getElementById('s-co')?.value || '';
+    searchQuery.dateType = document.getElementById('s-date-type')?.value || 'checkin';
     searchQuery.rangeFrom = document.getElementById('s-range-from')?.value || '';
     searchQuery.rangeTo = document.getElementById('s-range-to')?.value || '';
     render();
@@ -1596,12 +1599,13 @@ function attachHandlers(){
   if(sRun) sRun.onclick = runSearch;
   const sClear = document.getElementById('s-clear');
   if(sClear) sClear.onclick = ()=>{
-    searchQuery = {name:'', room:'', ciDate:'', coDate:'', rangeFrom:'', rangeTo:''};
+    searchQuery = {name:'', room:'', dateType:'checkin', rangeFrom:'', rangeTo:''};
     render();
   };
-  // Room is a dropdown and the dates are discrete picks, not free typing -- search immediately on
-  // selection so the room "shortcut" the user asked for doesn't need a separate button press too.
-  ['s-room','s-ci','s-co','s-range-from','s-range-to'].forEach(id=>{
+  // Room/date-type are dropdowns and the dates are discrete picks, not free typing -- search
+  // immediately on selection so the room "shortcut" the user asked for doesn't need a separate
+  // button press too.
+  ['s-room','s-date-type','s-range-from','s-range-to'].forEach(id=>{
     const el = document.getElementById(id);
     if(el) el.onchange = runSearch;
   });
