@@ -181,6 +181,17 @@
   .total-box .label{font-size:12.5px;color:#C9C2B3;}
   .total-box .amount{font-family:'Fraunces',serif;font-size:22px;color:var(--brass);}
 
+  .report-sticky-bar{
+    position:fixed;left:0;right:0;bottom:0;z-index:40;
+    background:var(--ink);color:var(--text-light);
+    border-top:3px solid var(--brass);box-shadow:0 -6px 20px rgba(28,36,32,0.25);
+    padding:12px 22px;display:flex;justify-content:center;gap:clamp(14px,4vw,36px);flex-wrap:wrap;
+  }
+  .report-sticky-bar .item{display:flex;flex-direction:column;align-items:center;gap:2px;}
+  .report-sticky-bar .item .label{font-size:11px;color:#C9C2B3;letter-spacing:.02em;}
+  .report-sticky-bar .item .value{font-family:'Fraunces',serif;font-size:19px;color:var(--brass);}
+  .report-sticky-bar .item.grand .value{font-size:23px;}
+
   .btn{
     font-family:inherit;font-size:13.5px;font-weight:600;
     padding:11px 16px;border-radius:9px;border:none;cursor:pointer;transition:opacity .15s ease;
@@ -347,7 +358,6 @@ function parseDate(s){ const [y,m,d]=s.split('-').map(Number); return new Date(y
 function addDays(dateStr, days){ const d=parseDate(dateStr); d.setDate(d.getDate()+days); return localDateStr(d); }
 function daysBetween(startStr, endStr){ const a=parseDate(startStr), b=parseDate(endStr); return Math.round((b-a)/86400000); }
 function todayStr(){ return localDateStr(new Date()); }
-function yesterdayStr(){ const d=new Date(); d.setDate(d.getDate()-1); return localDateStr(d); }
 function nowTimeStr(){ const d=new Date(); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 function nowLiveLabel(){
   const d=new Date();
@@ -384,15 +394,10 @@ function autoExtendOverdueRooms(){
 let state = null;
 let view = 'grid';
 let modal = null;
-let searchQuery = {name:'', room:'', dateFrom:'', dateTo:'', showVoided:true};
-let reportMode = 'day';
-let reportDate = todayStr();
-let rangeStartDate = todayStr();
-let rangeStartTime = '00:00';
-let rangeEndDate = todayStr();
-let rangeEndTime = nowTimeStr();
-let auditDate = yesterdayStr();
-let auditCashInput = '';
+let searchQuery = {name:'', room:'', ciDate:'', coDate:'', rangeFrom:'', rangeTo:''};
+let reportMonth = todayStr().slice(0,7);
+let reportRangeFrom = '';
+let reportRangeTo = '';
 let selectMode = false;
 let selectedRooms = [];
 let showBedSummary = false;
@@ -415,6 +420,7 @@ function migrateState(s){
     if(b.paymentType==='now') b.paymentType='cash';
     if(b.guestName===undefined || b.guestName===null) b.guestName='';
     if(b.autoExtendedPending===undefined) b.autoExtendedPending=false;
+    if(b.shortStay===undefined) b.shortStay=false;
   });
   s.revenueLog.forEach(e=>{
     if(e.voided===undefined) e.voided=false;
@@ -527,9 +533,6 @@ function bookingUnpaid(bookingId){
   const settled = entries.filter(e=>e.kind==='settle').reduce((s,e)=>s+e.amount,0);
   return Math.max(0, owed - settled);
 }
-function revenueForDate(dateStr){ return state.revenueLog.filter(l=>l.date===dateStr && !l.voided); }
-function revenueForMonth(monthStr){ return state.revenueLog.filter(l=>l.date.slice(0,7)===monthStr && !l.voided); }
-
 // The site always sends its full list of active (non-voided) received entries; the sheet matches
 // each row to one of these by id, leaving already-present rows untouched (so hand-edits made
 // directly in the sheet survive) and only adding new ones or deleting ones that dropped off this
@@ -696,28 +699,37 @@ function doConfirmCleaning(roomId){
 function doSaveEdit(bookingId, fields){
   const b = state.bookings[bookingId];
   const oldPaymentType = b.paymentType;
-  // A nights/date correction (from the search-page date fields) must recompute the total and log
-  // the difference, because bookingUnpaid() reads only revenueLog, never b.totalPrice -- silently
+  // A nights/date correction (from the edit-booking form) must recompute the total and log the
+  // difference, because bookingUnpaid() reads only revenueLog, never b.totalPrice -- silently
   // changing nights without this would leave "unpaid" showing the old, wrong figure forever.
-  if(fields.nights!==undefined && fields.nights!==b.nights){
-    const newTotal = fields.nights * b.pricePerNight;
-    fields.totalPrice = newTotal;
+  const newPrice = fields.pricePerNight!==undefined ? Math.max(0, parseInt(fields.pricePerNight,10)||0) : b.pricePerNight;
+  const priceChanged = newPrice !== b.pricePerNight;
+  const billNights = fields.nights!==undefined ? fields.nights : b.nights;
+  const nightsChanged = fields.nights!==undefined && fields.nights!==b.nights;
+  // fields.shortStay marks a guest who checked in and out the same calendar day -- still billed
+  // for 1 night (billNights, above, is never let to 0), but the room must free up for cleaning
+  // *today* rather than waiting for "tomorrow" the way a normal date edit would compute it.
+  if(nightsChanged || fields.shortStay){
     fields.autoExtendedPending = false; // either direction means this booking's dates are now settled
     const anchorCheckIn = fields.checkInDate || b.checkInDate;
-    if(fields.nights > b.nights){
-      pushNightlyRevenue(bookingId, b.roomId, b.guestName, addDays(anchorCheckIn, b.nights), fields.nights-b.nights,
-        b.pricePerNight, nowTimeStr(), 'later', 'addnights');
+    if(billNights > b.nights){
+      pushNightlyRevenue(bookingId, b.roomId, b.guestName, addDays(anchorCheckIn, b.nights), billNights-b.nights,
+        newPrice, nowTimeStr(), 'later', 'addnights');
     } else {
-      // Fewer nights than logged, most often correcting a wrong 13:00 auto-extend after the guest
-      // had actually already left. A shorter stay whose room is still marked 'occupied' would just
-      // read as overdue again and get auto-extended right back on the next tick -- so this has to
-      // be a real checkout, not just a number correction, for "the auto system won't touch it
-      // again" to actually hold. Only does this if the room is still this exact booking's live
-      // occupant, so it can never touch a room already re-let to someone else.
-      const newCheckOut = addDays(anchorCheckIn, fields.nights);
+      // Fewer nights than logged (or a same-day short stay), most often correcting a wrong 13:00
+      // auto-extend after the guest had actually already left. A shorter stay whose room is still
+      // marked 'occupied' would just read as overdue again and get auto-extended right back on the
+      // next tick -- so this has to be a real checkout, not just a number correction, for "the auto
+      // system won't touch it again" to actually hold. Only does this if the room is still this
+      // exact booking's live occupant, so it can never touch a room already re-let to someone else.
+      // The voiding cutoff stays nights-based (the day after the last *billed* night); the physical
+      // checkout stamp uses the literal date the user picked, which for a short stay is today, not
+      // "tomorrow" -- that's what actually frees the room up for same-day cleaning and re-letting.
+      const voidCutoff = addDays(anchorCheckIn, billNights);
+      const actualCheckOut = fields.checkOutDateExp || voidCutoff;
       const room = state.rooms.find(r=>r.id===b.roomId);
       if(room && room.bookingId===bookingId && room.status==='occupied'){
-        fields.checkOutDate = newCheckOut;
+        fields.checkOutDate = actualCheckOut;
         fields.checkOutTime = '';
         room.status = 'cleaning';
       }
@@ -727,12 +739,23 @@ function doSaveEdit(bookingId, fields){
       // staff void/adjust those by hand if this correction really does mean less was owed.
       state.revenueLog.forEach(e=>{
         if(e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights') &&
-           entryPaymentType(e)==='later' && e.date>=newCheckOut){
+           entryPaymentType(e)==='later' && e.date>=voidCutoff){
           e.voided = true;
         }
       });
     }
   }
+  // A price-per-night correction re-stamps every still-live nightly row for this booking, same
+  // idea as the payment-type flip below -- b.totalPrice is never the source of truth on its own.
+  if(priceChanged){
+    state.revenueLog.forEach(e=>{
+      if(e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights')){
+        e.amount = newPrice;
+      }
+    });
+  }
+  fields.pricePerNight = newPrice;
+  fields.totalPrice = billNights * newPrice;
   Object.assign(b, fields);
   if(fields.paymentType && fields.paymentType !== oldPaymentType){
     state.revenueLog.forEach(e=>{
@@ -743,6 +766,14 @@ function doSaveEdit(bookingId, fields){
   }
   saveState();
   modal=null; render();
+}
+
+function openEditBookingModal(bookingId){
+  const b = state.bookings[bookingId];
+  modal = {type:'editBooking', bookingId:b.id, form:{guestName:b.guestName, gender:b.gender,
+    docNumber:b.docNumber, nationality:b.nationality, phone:b.phone, paymentType:b.paymentType, wechatAmount:b.wechatAmount||'',
+    pricePerNight:b.pricePerNight, checkInDate:b.checkInDate, checkOutDateExp:addDays(b.checkInDate,b.nights)}};
+  render();
 }
 
 function doVoidBooking(bookingId){
@@ -789,7 +820,7 @@ function render(){
 }
 
 function renderConsole(){
-  const tabs = [['grid','ຜັງຫ້ອງພັກ'],['search','ຄົ້ນຫາ / ຈັດການ'],['reports','ລາຍງານ'],['audit','ກວດສອບເງິນ']];
+  const tabs = [['grid','ຜັງຫ້ອງພັກ'],['search','ຄົ້ນຫາ / ຈັດການ'],['reports','ລາຍງານ']];
   return `
   <div class="console">
     <div class="brand">
@@ -818,7 +849,6 @@ function renderView(){
   if(view==='grid') return renderGrid();
   if(view==='search') return renderSearch();
   if(view==='reports') return renderReports();
-  if(view==='audit') return renderAudit();
   return '';
 }
 
@@ -882,66 +912,66 @@ function renderGrid(){
   }).join('');
 }
 
-// A booking's own revenueLog entries are all checked at once: ✓ only if every non-voided
-// checkin/addnights entry for it has already synced, so a partially-extended, partially-synced
-// stay never falsely shows as fully sent.
-function bookingExcelStatus(bookingId){
-  const entries = state.revenueLog.filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights'));
-  if(!entries.length) return '';
-  return entries.every(e=>e.exportedToSheet) ? '✓' : '';
-}
-// b.paymentType is just what the booking started as -- a per-night settle (doSettlePayment) can
-// leave individual nights paid by a different method without ever touching that field, so read the
-// actual entries instead of the stale booking-level value.
-function bookingPaymentSummary(bookingId){
-  const entries = state.revenueLog.filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights'));
-  if(!entries.length) return '-';
-  const types = [...new Set(entries.map(e=>entryPaymentType(e)))];
-  return types.length===1 ? payLabel(types[0]) : 'ຫຼາຍຊ່ອງທາງ';
-}
 function renderSearch(){
   const results = Object.values(state.bookings).filter(b=>{
     const nameOk = !searchQuery.name || (b.guestName||'').toLowerCase().includes(searchQuery.name.toLowerCase());
-    const roomOk = !searchQuery.room || b.roomId.includes(searchQuery.room);
-    const dateOk = (!searchQuery.dateFrom || b.checkInDate>=searchQuery.dateFrom) && (!searchQuery.dateTo || b.checkInDate<=searchQuery.dateTo);
-    return nameOk && roomOk && dateOk;
+    const roomOk = !searchQuery.room || b.roomId===searchQuery.room;
+    const ciOk = !searchQuery.ciDate || b.checkInDate===searchQuery.ciDate;
+    const coOk = !searchQuery.coDate || b.checkOutDate===searchQuery.coDate;
+    // "ຊ່ວງວັນທີ" is an overlap search (who was staying at any point in this window), not an
+    // exact match -- an ongoing stay (no real checkOutDate yet) falls back to its expected
+    // checkout so it still shows up when the window covers today.
+    let rangeOk = true;
+    if(searchQuery.rangeFrom || searchQuery.rangeTo){
+      const stayEnd = b.checkOutDate || addDays(b.checkInDate, b.nights);
+      rangeOk = (!searchQuery.rangeTo || b.checkInDate<=searchQuery.rangeTo) &&
+                (!searchQuery.rangeFrom || stayEnd>=searchQuery.rangeFrom);
+    }
+    return nameOk && roomOk && ciOk && coOk && rangeOk;
   }).sort((a,b)=> Number(a.roomId)-Number(b.roomId) || a.checkInDate.localeCompare(b.checkInDate) || (a.checkInTime||'').localeCompare(b.checkInTime||''));
+
+  const roomOptions = state.rooms.slice().sort((a,c)=>Number(a.id)-Number(c.id));
 
   return `
   <div class="panel">
     <h2>ຄົ້ນຫາ / ຈັດການຂໍ້ມູນການເຂົ້າພັກ</h2>
     <div class="field-grid">
       <div class="field"><label>ຊື່-ນາມສະກຸນ</label><input id="s-name" value="${searchQuery.name}" placeholder="ພິມບາງສ່ວນຂອງຊື່"></div>
-      <div class="field"><label>ໝາຍເລກຫ້ອງ</label><input id="s-room" value="${searchQuery.room}" placeholder="ເຊັ່ນ 20"></div>
-      <div class="field"><label>ວັນທີເຊັກອິນ ຕັ້ງແຕ່</label><input id="s-date-from" type="date" value="${searchQuery.dateFrom}"></div>
-      <div class="field"><label>ຫາວັນທີ</label><input id="s-date-to" type="date" value="${searchQuery.dateTo}"></div>
+      <div class="field"><label>ຫ້ອງ</label>
+        <select id="s-room">
+          <option value="">— ທຸກຫ້ອງ —</option>
+          ${roomOptions.map(r=>`<option value="${r.id}" ${searchQuery.room===r.id?'selected':''}>${r.id}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>ວັນທີເຊັກອິນ</label><input id="s-ci" type="date" value="${searchQuery.ciDate}"></div>
+      <div class="field"><label>ວັນທີເຊັກເອົາທ໌</label><input id="s-co" type="date" value="${searchQuery.coDate}"></div>
+      <div class="field"><label>ຊ່ວງວັນທີ ຕັ້ງແຕ່</label><input id="s-range-from" type="date" value="${searchQuery.rangeFrom}"></div>
+      <div class="field"><label>ຫາວັນທີ</label><input id="s-range-to" type="date" value="${searchQuery.rangeTo}"></div>
       <div class="field" style="justify-content:flex-end;"><button class="btn btn-primary" id="s-run">ຄົ້ນຫາ</button></div>
+      <div class="field" style="justify-content:flex-end;"><button class="btn btn-ghost" id="s-clear">ລ້າງການຄົ້ນຫາ</button></div>
     </div>
-    <p style="font-size:12px;color:var(--text-mute);margin-top:12px;">ຄົ້ນຫາໄດ້ທຸກຫ້ອງ ທຸກຊ່ວງວັນທີ — ຂໍ້ມູນທຸກລາຍການຖືກເກັບໄວ້ຖາວອນ, ການ "ຍົກເລີກ" ຈະບໍ່ລຶບຂໍ້ມູນ ພຽງແຕ່ໝາຍວ່າຍົກເລີກເທົ່ານັ້ນ. ຜົນລັບຮຽງຕາມເລກຫ້ອງ ແລ້ວຕາມວັນທີ.</p>
+    <p style="font-size:12px;color:var(--text-mute);margin-top:12px;">ຕື່ມຊ່ອງບາງຊ່ອງຫຼືທັງຫມົດ.</p>
   </div>
   <div class="panel">
     <h2>ຜົນລັບ (${results.length})</h2>
     ${results.length===0 ? '<div class="empty">ບໍ່ພົບຂໍ້ມູນ</div>' : `
     <div class="table-scroll">
     <table>
-      <thead><tr><th>ຫ້ອງ</th><th>ຊື່ລູກຄ້າ</th><th>Check-in</th><th>Check-out</th><th>ຄືນ</th><th>ຍອດລວມ</th><th>ຄ້າງຈ່າຍ</th><th>ຊ່ອງທາງຈ່າຍ</th><th>Excel</th><th>ສະຖານະ</th><th>ຈັດການ</th></tr></thead>
+      <thead><tr><th>ວັນທີເຊັກອິນ</th><th>ວັນທີເຊັກເອົາທ໌</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ເບີໂທ</th><th>ເລກບັດ/ພາສປອດ</th><th>ການຊຳລະ</th><th>ຈັດການ</th></tr></thead>
       <tbody>
         ${results.map(b=>{
           const unpaid = bookingUnpaid(b.id);
           return `
           <tr>
-            <td class="num">${b.roomId}</td>
-            <td>${b.guestName}</td>
             <td>${fmtDate(b.checkInDate)} ${b.checkInTime?('· '+b.checkInTime):''}</td>
             <td>${b.checkOutDate?(fmtDate(b.checkOutDate)+' '+(b.checkOutTime||'')):'ຍັງພັກຢູ່'}</td>
-            <td>${b.nights}</td>
-            <td>${fmtMoney(b.totalPrice)}</td>
-            <td>${unpaid>0?fmtMoney(unpaid):'-'}</td>
-            <td>${bookingPaymentSummary(b.id)}</td>
-            <td class="num">${bookingExcelStatus(b.id)}</td>
-            <td>${b.voided?'<span class="badge void">ຍົກເລີກແລ້ວ</span>':'<span class="badge active">ໃຊ້ງານ</span>'}</td>
+            <td>${b.guestName||'-'} ${b.voided?'<span class="badge void" style="margin-left:6px;">ຍົກເລີກແລ້ວ</span>':''}</td>
+            <td class="num">${b.roomId}</td>
+            <td>${b.phone||'-'}</td>
+            <td>${b.docNumber||'-'}</td>
+            <td>${unpaid>0?`<span class="badge void">ຄ້າງ ${fmtMoney(unpaid)}</span>`:`<span class="badge active">ຈ່າຍຄົບແລ້ວ</span>`}</td>
             <td class="row-actions">
-              <button class="btn btn-ghost btn-sm" data-edit="${b.id}">ແກ້ໄຂ</button>
+              <button class="btn btn-ghost btn-sm" data-edit="${b.id}">✏️ ແກ້ໄຂ</button>
               ${b.groupId ? `<button class="btn btn-ghost btn-sm" data-bill="${b.groupId}">ໃບບິນລວມ</button>` : ''}
               ${b.voided?'':`<button class="btn btn-danger btn-sm" data-void="${b.id}">ຍົກເລີກ</button>`}
             </td>
@@ -952,158 +982,93 @@ function renderSearch(){
   </div>`;
 }
 
-function reportsEntriesForMode(){
-  if(reportMode==='day') return revenueForDate(reportDate);
-  if(reportMode==='month') return revenueForMonth(reportDate.slice(0,7));
-  const startKey = rangeStartDate + ' ' + (rangeStartTime||'00:00');
-  const endKey = rangeEndDate + ' ' + (rangeEndTime||'23:59');
-  return state.revenueLog.filter(e=>{
-    if(e.voided) return false;
-    const key = e.date + ' ' + (e.time||'00:00');
-    return key>=startKey && key<=endKey;
-  });
+// A stay belongs to whichever month it checked in during -- the whole booking is one row (its
+// money total spans however many nights it ran), so it can't also be split across any month it
+// might have bled into via a later checkout.
+function bookingsForReportMonth(monthStr){
+  return Object.values(state.bookings)
+    .filter(b=>!b.voided && b.checkInDate && b.checkInDate.slice(0,7)===monthStr)
+    .sort((a,b)=> a.checkInDate.localeCompare(b.checkInDate) || (a.checkInTime||'').localeCompare(b.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
 }
-function receivedEntriesForMode(){
-  return reportsEntriesForMode().filter(e=> e.kind==='settle' || entryPaymentType(e)!=='later');
+// A "ຕັ້ງແຕ່-ຫາ" search is an overlap search across ALL months (not just the one currently
+// selected) -- who was staying at any point in this window. An ongoing stay (no real checkOutDate
+// yet) falls back to its expected checkout so it still counts when the window covers today.
+function bookingsForReportRange(fromDate, toDate){
+  return Object.values(state.bookings)
+    .filter(b=>{
+      if(b.voided || !b.checkInDate) return false;
+      const stayEnd = b.checkOutDate || addDays(b.checkInDate, b.nights);
+      return (!toDate || b.checkInDate<=toDate) && (!fromDate || stayEnd>=fromDate);
+    })
+    .sort((a,b)=> a.checkInDate.localeCompare(b.checkInDate) || (a.checkInTime||'').localeCompare(b.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
+}
+// Only money actually received (settlements plus anything not still 'later'), the same rule the
+// rest of the app uses -- b.totalPrice alone would count still-unpaid amounts as if collected.
+function bookingReceived(bookingId){
+  const entries = state.revenueLog.filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='settle' || entryPaymentType(e)!=='later'));
+  const total = entries.reduce((s,e)=>s+e.amount,0);
+  const byMethod = m => entries.filter(e=>entryPaymentType(e)===m).reduce((s,e)=>s+e.amount,0);
+  return { total, bcel:byMethod('bcel'), ldb:byMethod('ldb'), wechat:byMethod('wechat') };
 }
 
 function renderReports(){
-  const allEntries = reportsEntriesForMode();
-  const receivedEntries = receivedEntriesForMode();
-  const laterNewEntries = allEntries.filter(e=> e.kind!=='settle' && entryPaymentType(e)==='later');
-  const total = receivedEntries.reduce((s,e)=>s+e.amount,0);
-  const cash = receivedEntries.filter(e=>entryPaymentType(e)==='cash').reduce((s,e)=>s+e.amount,0);
-  const digital = receivedEntries.filter(e=>DIGITAL_PAY_TYPES.includes(entryPaymentType(e))).reduce((s,e)=>s+e.amount,0);
-  const later = laterNewEntries.reduce((s,e)=>s+e.amount,0);
-  const roomNights = allEntries.length;
+  const rangeActive = !!(reportRangeFrom || reportRangeTo);
+  const bookings = rangeActive ? bookingsForReportRange(reportRangeFrom, reportRangeTo) : bookingsForReportMonth(reportMonth);
+  const rows = bookings.map(b=>({ b, money: bookingReceived(b.id) }));
+  const grand = rows.reduce((s,r)=>s+r.money.total,0);
+  const bcelSum = rows.reduce((s,r)=>s+r.money.bcel,0);
+  const ldbSum = rows.reduce((s,r)=>s+r.money.ldb,0);
+  const wechatSum = rows.reduce((s,r)=>s+r.money.wechat,0);
   const syncCount = entriesToSync().length;
+  const grandLabel = rangeActive
+    ? `ຍອດຮັບທັງໝົດຊ່ວງວັນທີ ${reportRangeFrom?fmtDate(reportRangeFrom):'…'} — ${reportRangeTo?fmtDate(reportRangeTo):'…'}`
+    : 'ຍອດຮັບທັງໝົດເດືອນນີ້';
 
   return `
-  <div class="panel">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-      <h2 style="margin:0;">ລາຍງານລາຍຮັບ</h2>
+  <div class="panel" style="margin-bottom:100px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <h2 style="margin:0;">ລາຍງານລາຍຮັບ</h2>
+        <input type="month" id="r-month" value="${reportMonth}">
+      </div>
       <div style="display:flex;align-items:center;gap:10px;">
         ${reportStatusMsg ? `<span style="font-size:12px;color:var(--text-mute);">${reportStatusMsg}</span>` : ''}
         <button class="btn btn-primary btn-sm" id="send-report-btn" title="ຂຽນທັບຊີດ Excel ໃຫ້ກົງກັບຂໍ້ມູນໃນເວັບທັງໝົດ" ${reportSending||syncCount===0?'disabled':''}>⤴ ສົ່ງເຂົ້າ Excel ${syncCount>0?`(${syncCount})`:''}</button>
       </div>
     </div>
-    <div class="radio-row" style="margin-bottom:16px;flex-wrap:wrap;">
-      <label><input type="radio" name="rmode" value="day" ${reportMode==='day'?'checked':''} id="rmode-day"> ລາຍວັນ</label>
-      <label><input type="radio" name="rmode" value="month" ${reportMode==='month'?'checked':''} id="rmode-month"> ລາຍເດືອນ</label>
-      <label><input type="radio" name="rmode" value="range" ${reportMode==='range'?'checked':''} id="rmode-range"> ຊ່ວງເວລາກຳນົດເອງ</label>
-      ${reportMode==='day' ? `<input type="date" id="r-date" value="${reportDate}">` : ''}
-      ${reportMode==='month' ? `<input type="month" id="r-date" value="${reportDate.slice(0,7)}">` : ''}
+    <div class="field-grid" style="margin-bottom:10px;">
+      <div class="field"><label>ຫຼືຄົ້ນຫາຊ່ວງວັນທີ ຕັ້ງແຕ່ວັນທີ</label><input type="date" id="r-range-from" value="${reportRangeFrom}"></div>
+      <div class="field"><label>ຫາວັນທີ</label><input type="date" id="r-range-to" value="${reportRangeTo}"></div>
+      <div class="field" style="justify-content:flex-end;"><button class="btn btn-ghost btn-sm" id="r-range-clear">ລ້າງການຄົ້ນຫາຊ່ວງວັນທີ</button></div>
     </div>
-    ${reportMode==='range' ? `
-    <div class="field-grid" style="margin-bottom:16px;">
-      <div class="field"><label>ວັນທີ-ເວລາເລີ່ມ</label>
-        <div style="display:flex;gap:6px;">
-          <input type="date" id="r-start-date" value="${rangeStartDate}" style="flex:1;">
-          <input type="time" id="r-start-time" value="${rangeStartTime}" style="flex:1;">
-        </div>
-      </div>
-      <div class="field"><label>ວັນທີ-ເວລາສິ້ນສຸດ</label>
-        <div style="display:flex;gap:6px;">
-          <input type="date" id="r-end-date" value="${rangeEndDate}" style="flex:1;">
-          <input type="time" id="r-end-time" value="${rangeEndTime}" style="flex:1;">
-        </div>
-      </div>
-    </div>` : ''}
-    <div class="stat-row">
-      <div class="stat"><div class="label">ຍອດຮັບຈິງທັງໝົດ (ຊ່ວງນີ້)</div><div class="value num">${fmtMoney(total)}</div></div>
-      <div class="stat"><div class="label">ຈ່າຍສົດ</div><div class="value num">${fmtMoney(cash)}</div></div>
-      <div class="stat"><div class="label">ໂອນເງິນ (BCEL/LDB/WeChat)</div><div class="value num">${fmtMoney(digital)}</div></div>
-      <div class="stat"><div class="label">ຈອງໃໝ່ແບບຄ້າງຈ່າຍ</div><div class="value num">${fmtMoney(later)}</div></div>
-      <div class="stat"><div class="label">ລາຍການທັງໝົດ</div><div class="value num">${roomNights}</div></div>
-    </div>
-    <p style="font-size:11.5px;color:var(--text-mute);">ຍອດຮັບຈິງນັບຕາມວັນ-ເວລາທີ່ໄດ້ຮັບເງິນແທ້ໆ (ລວມການຊຳລະຄ້າງເກົ່າທີ່ຮັບໃນຊ່ວງນີ້ນຳ) — ລາຍການທີ່ຖືກຍົກເລີກຈະບໍ່ນັບໃນລາຍງານນີ້ ແຕ່ຍັງຖືກເກັບໄວ້ໃນລະບົບ (ເບິ່ງໄດ້ທີ່ໜ້າ "ຄົ້ນຫາ / ຈັດການ")</p>
-    ${allEntries.length===0 ? '<div class="empty">ບໍ່ມີລາຍການໃນຊ່ວງນີ້</div>' : `
+    <p style="font-size:11.5px;color:var(--text-mute);margin-top:0;margin-bottom:16px;">ລາຍລະອຽດລາຍຮັບ ລາຍເດືອນ(ປ່ຽນເດືອນຢູ່ຂ້າງເທິງ)</p>
+    ${rows.length===0 ? '<div class="empty">ບໍ່ມີລາຍການໃນຊ່ວງນີ້</div>' : `
     <div class="table-scroll">
     <table>
-      <thead><tr><th>ວັນທີ</th><th>ເວລາ</th><th>ຫ້ອງ</th><th>ລູກຄ້າ</th><th>ປະເພດ</th><th>ການຊຳລະ</th><th>ຈຳນວນເງິນ</th><th>Excel</th></tr></thead>
+      <thead><tr><th>ເຊັກອິນ</th><th>ເຊັກເອົາທ໌</th><th>ຄືນ</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ຈ່າຍທັງໝົດ</th><th>BCEL</th><th>LDB</th><th>WeChat</th></tr></thead>
       <tbody>
-        ${allEntries.map(e=>{
-          const eb = state.bookings[e.bookingId];
-          const checkedOut = eb && eb.checkOutDate;
-          const kindLabel = e.kind==='checkin'?'ເຊັກອິນ':e.kind==='addnights'?'ເພີ່ມຄືນ':'ຊຳລະຄ້າງຈ່າຍ';
-          return `
+        ${rows.map(({b,money})=>`
           <tr>
-            <td>${fmtDate(e.date)}</td>
-            <td>${e.time||'-'}</td>
-            <td class="num">${e.roomId}</td>
-            <td>${e.guestName}</td>
-            <td>${kindLabel}${checkedOut?' · ເຊັກເອົາທ໌ແລ້ວ':''}</td>
-            <td>${payLabel(entryPaymentType(e))}</td>
-            <td>${fmtMoney(e.amount)}</td>
-            <td>${e.exportedToSheet?'✓':''}</td>
-          </tr>`;}).join('')}
+            <td>${fmtDate(b.checkInDate)}</td>
+            <td>${b.checkOutDate?fmtDate(b.checkOutDate):'ຍັງພັກຢູ່'}</td>
+            <td>${b.shortStay?'ພັກຊົ່ວຄາວ':b.nights}</td>
+            <td>${b.guestName||'-'}</td>
+            <td class="num">${b.roomId}</td>
+            <td>${fmtMoney(money.total)}</td>
+            <td>${money.bcel?fmtMoney(money.bcel):'-'}</td>
+            <td>${money.ldb?fmtMoney(money.ldb):'-'}</td>
+            <td>${money.wechat?fmtMoney(money.wechat):'-'}</td>
+          </tr>`).join('')}
       </tbody>
     </table>
     </div>`}
+  </div>
+  <div class="report-sticky-bar">
+    <div class="item grand"><div class="label">${grandLabel}</div><div class="value num">${fmtMoney(grand)}</div></div>
+    <div class="item"><div class="label">BCEL</div><div class="value num">${fmtMoney(bcelSum)}</div></div>
+    <div class="item"><div class="label">LDB</div><div class="value num">${fmtMoney(ldbSum)}</div></div>
+    <div class="item"><div class="label">WeChat</div><div class="value num">${fmtMoney(wechatSum)}</div></div>
   </div>`;
-}
-
-function renderAudit(){
-  return `
-  <div class="panel">
-    <h2>ກວດສອບເງິນ</h2>
-    <div class="field-grid" style="margin-bottom:6px;">
-      <div class="field"><label>ກວດສອບຂໍ້ມູນຂອງວັນທີ</label><input type="date" id="a-date" value="${auditDate}"></div>
-      <div class="field"><label>ເງິນສົດທີ່ນັບໄດ້ຈິງ (₭)</label><input type="number" id="a-cash" min="0" value="${auditCashInput}" placeholder="ປ້ອນຈຳນວນເງິນສົດ"></div>
-    </div>
-    <div id="audit-stats-wrap">${renderAuditStats()}</div>
-    <div id="audit-alert-wrap">${renderAuditAlert()}</div>
-    <div id="audit-tables-wrap">${renderAuditTables()}</div>
-  </div>`;
-}
-function auditEntries(){ return revenueForDate(auditDate).filter(e=>entryPaymentType(e)==='cash'); }
-function auditDigitalEntries(){ return revenueForDate(auditDate).filter(e=>DIGITAL_PAY_TYPES.includes(entryPaymentType(e))); }
-function auditLaterEntries(){ return revenueForDate(auditDate).filter(e=>entryPaymentType(e)==='later'); }
-function renderAuditStats(){
-  const entries = auditEntries(); const digital = auditDigitalEntries(); const later = auditLaterEntries();
-  const expected = entries.reduce((s,e)=>s+e.amount,0);
-  return `
-    <div class="stat-row">
-      <div class="stat"><div class="label">ຍອດເງິນສົດທີ່ຄວນໄດ້ຮັບ</div><div class="value num">${fmtMoney(expected)}</div></div>
-      <div class="stat"><div class="label">ໂອນເງິນເຂົ້າ BCEL/LDB/WeChat (ບໍ່ນັບເປັນເງິນສົດ)</div><div class="value num">${fmtMoney(digital.reduce((s,e)=>s+e.amount,0))}</div></div>
-      <div class="stat"><div class="label">ຈ່າຍພາຍຫຼັງ (ບໍ່ນັບເງິນສົດ)</div><div class="value num">${fmtMoney(later.reduce((s,e)=>s+e.amount,0))}</div></div>
-      <div class="stat"><div class="label">ຈຳນວນລາຍການເງິນສົດ</div><div class="value num">${entries.length}</div></div>
-    </div>`;
-}
-function renderAuditAlert(){
-  const expected = auditEntries().reduce((s,e)=>s+e.amount,0);
-  const counted = auditCashInput===''? null : Number(auditCashInput);
-  if(counted===null) return '';
-  const diff = counted - expected;
-  if(diff===0) return `<div class="alert ok">✓ ຍອດເງິນກົງກັບລະບົບ (${fmtMoney(counted)}) ບໍ່ມີສ່ວນຕ່າງ</div>`;
-  return `<div class="alert warn">⚠ ຍອດເງິນບໍ່ກົງ! ນັບໄດ້ ${fmtMoney(counted)} ແຕ່ລະບົບຄາດວ່າຄວນໄດ້ ${fmtMoney(expected)}
-    — ສ່ວນຕ່າງ <strong>${fmtMoney(Math.abs(diff))} ${diff<0?'(ເງິນຂາດ)':'(ເງິນເກີນ)'}</strong>. ກະລຸນາກວດສອບຫ້ອງລຸ່ມນີ້ວ່າມີຫ້ອງໃດຊຳລະບໍ່ຄົບ</div>`;
-}
-function auditReceivedEntries(){
-  return [...auditEntries(), ...auditDigitalEntries()].sort((a,b)=> a.roomId.localeCompare(b.roomId));
-}
-function renderAuditTables(){
-  const received = auditReceivedEntries(); const later = auditLaterEntries();
-  return `
-    ${received.length===0 ? '<div class="empty">ບໍ່ມີລາຍການຮັບເງິນໃນວັນທີ່ເລືອກ</div>' : `
-    <table>
-      <thead><tr><th>ຫ້ອງ</th><th>ລູກຄ້າ</th><th>ຈ່າຍແບບ</th><th>ຈຳນວນເງິນ</th></tr></thead>
-      <tbody>
-        ${received.map(e=>`<tr><td class="num">${e.roomId}</td><td>${e.guestName}</td><td>${payLabel(entryPaymentType(e))}</td><td>${fmtMoney(e.amount)}</td></tr>`).join('')}
-      </tbody>
-    </table>`}
-    ${later.length===0 ? '' : `
-    <div style="margin-top:18px;font-size:12px;color:var(--text-mute);font-weight:600;">ລາຍການຈ່າຍພາຍຫຼັງ (ຄ້າງ, ບໍ່ນັບໃນຍອດຮັບແລ້ວ)</div>
-    <table><tbody>
-      ${later.map(e=>`<tr><td class="num">${e.roomId}</td><td>${e.guestName}</td><td>${fmtMoney(e.amount)}</td></tr>`).join('')}
-    </tbody></table>`}
-  `;
-}
-function updateAuditLive(){
-  const cashEl = document.getElementById('a-cash');
-  if(cashEl) auditCashInput = cashEl.value;
-  const alertWrap = document.getElementById('audit-alert-wrap');
-  if(alertWrap) alertWrap.innerHTML = renderAuditAlert();
 }
 
 /* ---------------- Modal ---------------- */
@@ -1286,14 +1251,14 @@ function renderOccupiedModal(){
   const extraNights = daysBetween(currentDue, modal.targetCheckout);
   const unpaid = bookingUnpaid(b.id);
   if(!modal.settleMethod) modal.settleMethod = 'cash';
-  const editCI = modal.editCheckIn || b.checkInDate;
-  const editCO = modal.editCheckOut || currentDue;
-  const editNights = daysBetween(editCI, editCO);
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
       <button class="modal-close" id="m-close">✕</button>
-      <h2>ຫ້ອງ ${room.id} — ມີແຂກພັກຢູ່</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <h2 style="margin:0;">ຫ້ອງ ${room.id} — ມີແຂກພັກຢູ່</h2>
+        <button class="btn btn-ghost btn-sm" id="m-edit-booking">✏️ ແກ້ໄຂຂໍ້ມູນ</button>
+      </div>
       ${modal.overdueNotice ? `<div class="alert warn">⚠️ ຫ້ອງນີ້ຄາດວ່າຈະ Check-out ວັນທີ ${fmtDate(currentDue)} ແລ້ວ — ກະລຸນາເລືອກ ເພີ່ມຄືນ ຫຼື Check-out</div>` : ''}
       ${modal.autoExtendNotice ? `<div class="alert info">ℹ️ ຫ້ອງນີ້ຖືກຕໍ່ຄືນອັດຕະໂນມັດ (ຈ່າຍພາຍຫຼັງ) — ກະລຸນາກວດສອບວ່າຖືກຕ້ອງ</div>` : ''}
       <div class="info-grid">
@@ -1326,15 +1291,7 @@ function renderOccupiedModal(){
           <button class="btn btn-primary" id="m-addnights" ${extraNights>0?'':'disabled'}>ເພີ່ມຄືນ ແລະ ບັນທຶກຊຳລະເງິນ</button>
         </div>
       </div>
-      <div class="panel" style="box-shadow:none;border:1px solid var(--paper-line);padding:16px 18px;margin-top:16px;">
-        <h2 style="font-size:15px;">ແກ້ໄຂວັນທີເຊັກອິນ/ເຊັກເອົາທ໌ຍ້ອນຫຼັງ</h2>
-        <div class="field-grid">
-          <div class="field"><label>ວັນທີເຊັກອິນ</label><input type="date" id="oc-checkin" value="${editCI}"></div>
-          <div class="field"><label>ວັນທີເຊັກເອົາທ໌ ${editNights>0?`(= ${editNights} ຄືນ)`:'(ຜິດ)'}</label><input type="date" id="oc-checkout" value="${editCO}"></div>
-        </div>
-        <p style="font-size:11px;color:var(--text-mute);">ຖ້າຫຼຸດຈຳນວນຄືນ ແລະ ຫ້ອງນີ້ຍັງພັກຢູ່ ລະບົບຈະ Check-out ໃຫ້ທັນທີຕາມວັນທີໃໝ່ (ລະບົບອັດຕະໂນມັດຈະບໍ່ຕໍ່ຄືນໃຫ້ອີກ) ຍອດຄ້າງຈ່າຍຂອງຄືນທີ່ຖືກຕັດອອກ (ຖ້າຍັງບໍ່ໄດ້ຈ່າຍ) ຈະຖືກຍົກເລີກໃຫ້ອັດຕະໂນມັດນຳ</p>
-        <div class="btn-row"><button class="btn btn-primary" id="m-save-dates" ${editNights>0?'':'disabled'}>ບັນທຶກວັນທີ</button></div>
-      </div>
+      <p style="font-size:11px;color:var(--text-mute);margin-top:16px;">ຕ້ອງການແກ້ໄຂຊື່ລູກຄ້າ, ວັນທີເຊັກອິນ/ເຊັກເອົາທ໌ຍ້ອນຫຼັງ, ລາຄາ ຫຼືຊ່ອງທາງຈ່າຍ? ກົດ "✏️ ແກ້ໄຂຂໍ້ມູນ" ດ້ານເທິງ</p>
       ${unpaid>0 ? `<div class="alert info">ຫ້ອງນີ້ຍັງມີຍອດຄ້າງຊຳລະ ${fmtMoney(unpaid)} — ເລືອກຊ່ອງທາງແລ້ວກົດຊຳລະ ກ່ອນ Check-out ຖ້າລູກຄ້າຈ່າຍແລ້ວ</div>` : ''}
       ${unpaid>0 ? `<div class="field-grid" style="margin-bottom:8px;"><div class="field"><label>ຊຳລະຄ້າງດ້ວຍຊ່ອງທາງໃດ</label>
         <select id="settle-method">
@@ -1375,7 +1332,12 @@ function renderEditModal(){
   const b = state.bookings[modal.bookingId];
   const f = modal.form;
   const wechatVisible = f.paymentType==='wechat';
-  const nightsPreview = (f.checkInDate && f.checkOutDateExp) ? daysBetween(f.checkInDate, f.checkOutDateExp) : b.nights;
+  const rawNights = (f.checkInDate && f.checkOutDateExp) ? daysBetween(f.checkInDate, f.checkOutDateExp) : b.nights;
+  const isShortStay = rawNights === 0;
+  const nightsPreview = isShortStay ? 1 : rawNights;
+  const pricePreview = f.pricePerNight!==undefined ? (parseInt(f.pricePerNight,10)||0) : b.pricePerNight;
+  const totalPreview = (nightsPreview>0 ? nightsPreview : b.nights) * pricePreview;
+  const checkoutLabel = isShortStay ? '(ພັກຊົ່ວຄາວ — ເຂົ້າ-ອອກມື້ດຽວກັນ)' : (nightsPreview>0?`(= ${nightsPreview} ຄືນ)`:'(ຜິດ — ຕ້ອງບໍ່ກ່ອນວັນເຊັກອິນ)');
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1383,7 +1345,8 @@ function renderEditModal(){
       <h2>ແກ້ໄຂຂໍ້ມູນ — ຫ້ອງ ${b.roomId} ${b.voided?'<span class="badge void" style="margin-left:8px;">ຍົກເລີກແລ້ວ</span>':''}</h2>
       <div class="field-grid">
         <div class="field"><label>ວັນທີເຊັກອິນ</label><input type="date" id="ef-checkin" value="${f.checkInDate||''}"></div>
-        <div class="field"><label>ວັນທີເຊັກເອົາທ໌ (ຄາດ) ${nightsPreview>0?`(= ${nightsPreview} ຄືນ)`:'(ຜິດ — ຕ້ອງຫຼັງວັນເຊັກອິນ)'}</label><input type="date" id="ef-checkout" value="${f.checkOutDateExp||''}"></div>
+        <div class="field"><label>ວັນທີເຊັກເອົາທ໌ (ຄາດ) ${checkoutLabel}</label><input type="date" id="ef-checkout" value="${f.checkOutDateExp||''}"></div>
+        <div class="field"><label>ລາຄາ/ຄືນ</label><input type="number" min="0" id="ef-price" value="${pricePreview}"></div>
         <div class="field full"><label>ຊື່-ນາມສະກຸນ ລູກຄ້າ</label><input id="ef-guestname" value="${f.guestName||''}"></div>
         <div class="field"><label>ເພດ</label>
           <select id="ef-gender">
@@ -1412,8 +1375,12 @@ function renderEditModal(){
           <input type="number" min="0" id="ef-wechat-amount" value="${f.wechatAmount||''}">
         </div>
       </div>
+      <div class="total-box">
+        <span class="label">ຍອດລວມໃໝ່ (ຄາດ)</span>
+        <span class="amount num">${fmtMoney(totalPreview)}</span>
+      </div>
       <p style="font-size:11.5px;color:var(--text-mute);margin-top:10px;">ການແກ້ໄຂນີ້ບໍ່ໄດ້ລຶບປະຫວັດການເງິນເກົ່າ — ຂໍ້ມູນເດີມຍັງຖືກເກັບໄວ້ຄົບຖ້ວນສະເໝີ</p>
-      <p style="font-size:11.5px;color:var(--text-mute);">ຖ້າຈຳນວນຄືນເພີ່ມຂຶ້ນ ລະບົບຈະບັນທຶກຍອດເພີ່ມເປັນ 'ຈ່າຍພາຍຫຼັງ' ໃຫ້ອັດຕະໂນມັດ — ຖ້າຫຼຸດລົງ ຈະ Check-out ໃຫ້ທັນທີ (ຖ້າຫ້ອງຍັງພັກຢູ່) ແລະຍົກເລີກຍອດຄ້າງຈ່າຍຂອງຄືນທີ່ຖືກຕັດອອກໃຫ້ອັດຕະໂນມັດ</p>
+      <p style="font-size:11.5px;color:var(--text-mute);">ຖ້າຈຳນວນຄືນເພີ່ມຂຶ້ນ ລະບົບຈະບັນທຶກຍອດເພີ່ມເປັນ 'ຈ່າຍພາຍຫຼັງ' ໃຫ້ອັດຕະໂນມັດ — ຖ້າຫຼຸດລົງ ຈະ Check-out ໃຫ້ທັນທີ (ຖ້າຫ້ອງຍັງພັກຢູ່) ແລະຍົກເລີກຍອດຄ້າງຈ່າຍຂອງຄືນທີ່ຖືກຕັດອອກໃຫ້ອັດຕະໂນມັດ ຖ້າແກ້ລາຄາ/ຄືນ ຍອດທຸກຄືນທີ່ຍັງບໍ່ຖືກຍົກເລີກຈະຖືກປັບໃຫ້ເປັນລາຄາໃໝ່ນຳ</p>
       <div class="btn-row">
         <button class="btn btn-ghost" id="m-cancel">ປິດ</button>
         ${b.voided?'':`<button class="btn btn-danger" id="m-void">ຍົກເລີກການເຊັກອິນນີ້</button>`}
@@ -1613,24 +1580,29 @@ function attachHandlers(){
   const runSearch = ()=>{
     searchQuery.name = document.getElementById('s-name')?.value || '';
     searchQuery.room = document.getElementById('s-room')?.value || '';
-    searchQuery.dateFrom = document.getElementById('s-date-from')?.value || '';
-    searchQuery.dateTo = document.getElementById('s-date-to')?.value || '';
+    searchQuery.ciDate = document.getElementById('s-ci')?.value || '';
+    searchQuery.coDate = document.getElementById('s-co')?.value || '';
+    searchQuery.rangeFrom = document.getElementById('s-range-from')?.value || '';
+    searchQuery.rangeTo = document.getElementById('s-range-to')?.value || '';
     render();
   };
   const sRun = document.getElementById('s-run');
   if(sRun) sRun.onclick = runSearch;
-  ['s-name','s-room','s-date-from','s-date-to'].forEach(id=>{
+  const sClear = document.getElementById('s-clear');
+  if(sClear) sClear.onclick = ()=>{
+    searchQuery = {name:'', room:'', ciDate:'', coDate:'', rangeFrom:'', rangeTo:''};
+    render();
+  };
+  // Room is a dropdown and the dates are discrete picks, not free typing -- search immediately on
+  // selection so the room "shortcut" the user asked for doesn't need a separate button press too.
+  ['s-room','s-ci','s-co','s-range-from','s-range-to'].forEach(id=>{
     const el = document.getElementById(id);
-    if(el) el.onkeydown = (e)=>{ if(e.key==='Enter') runSearch(); };
+    if(el) el.onchange = runSearch;
   });
+  const sName = document.getElementById('s-name');
+  if(sName) sName.onkeydown = (e)=>{ if(e.key==='Enter') runSearch(); };
   document.querySelectorAll('[data-edit]').forEach(el=>{
-    el.onclick = ()=>{
-      const b = state.bookings[el.dataset.edit];
-      modal = {type:'editBooking', bookingId:b.id, form:{guestName:b.guestName, gender:b.gender,
-        docNumber:b.docNumber, nationality:b.nationality, phone:b.phone, paymentType:b.paymentType, wechatAmount:b.wechatAmount||'',
-        checkInDate:b.checkInDate, checkOutDateExp:addDays(b.checkInDate,b.nights)}};
-      render();
-    };
+    el.onclick = ()=> openEditBookingModal(el.dataset.edit);
   });
   document.querySelectorAll('[data-void]').forEach(el=>{
     el.onclick = ()=>{
@@ -1649,35 +1621,20 @@ function attachHandlers(){
   });
 
   // reports
-  const rDay = document.getElementById('rmode-day');
-  const rMonth = document.getElementById('rmode-month');
-  const rRange = document.getElementById('rmode-range');
-  if(rDay) rDay.onchange = ()=>{ reportMode='day'; reportDate = todayStr(); render(); };
-  if(rMonth) rMonth.onchange = ()=>{ reportMode='month'; reportDate = todayStr(); render(); };
-  if(rRange) rRange.onchange = ()=>{
-    reportMode='range';
-    rangeStartDate = todayStr(); rangeStartTime = '00:00';
-    rangeEndDate = todayStr(); rangeEndTime = nowTimeStr();
+  const rMonth = document.getElementById('r-month');
+  if(rMonth) rMonth.onchange = (e)=>{
+    reportMonth = e.target.value;
+    reportRangeFrom = ''; reportRangeTo = ''; // switching month by hand while a range search is active would just read as "wrong month"
     render();
   };
-  const rDate = document.getElementById('r-date');
-  if(rDate) rDate.onchange = (e)=>{ reportDate = reportMode==='day' ? e.target.value : e.target.value+'-01'; render(); };
-  const rStartDate = document.getElementById('r-start-date');
-  const rStartTime = document.getElementById('r-start-time');
-  const rEndDate = document.getElementById('r-end-date');
-  const rEndTime = document.getElementById('r-end-time');
-  if(rStartDate) rStartDate.onchange = (e)=>{ rangeStartDate = e.target.value; render(); };
-  if(rStartTime) rStartTime.onchange = (e)=>{ rangeStartTime = e.target.value; render(); };
-  if(rEndDate) rEndDate.onchange = (e)=>{ rangeEndDate = e.target.value; render(); };
-  if(rEndTime) rEndTime.onchange = (e)=>{ rangeEndTime = e.target.value; render(); };
+  const rRangeFrom = document.getElementById('r-range-from');
+  if(rRangeFrom) rRangeFrom.onchange = (e)=>{ reportRangeFrom = e.target.value; render(); };
+  const rRangeTo = document.getElementById('r-range-to');
+  if(rRangeTo) rRangeTo.onchange = (e)=>{ reportRangeTo = e.target.value; render(); };
+  const rRangeClear = document.getElementById('r-range-clear');
+  if(rRangeClear) rRangeClear.onclick = ()=>{ reportRangeFrom = ''; reportRangeTo = ''; render(); };
   const sendReportBtn = document.getElementById('send-report-btn');
   if(sendReportBtn) sendReportBtn.onclick = ()=>{ sendReportToExcel(); };
-
-  // audit
-  const aDate = document.getElementById('a-date');
-  if(aDate) aDate.onchange = (e)=>{ auditDate = e.target.value; auditCashInput=''; render(); };
-  const aCash = document.getElementById('a-cash');
-  if(aCash) aCash.oninput = ()=>{ updateAuditLive(); };
 
   // modal generic close
   const overlay = document.getElementById('overlay');
@@ -1798,19 +1755,10 @@ function attachHandlers(){
       if(n < 1){ alert('ວັນທີຕ້ອງຫຼັງວັນຄາດເຊັກເອົາທ໌ປັດຈຸບັນ'); return; }
       doAddNights(modal.roomId, room.bookingId, n, modal.extraPay||'later');
     };
-    const ociCheckin = document.getElementById('oc-checkin');
-    const ociCheckout = document.getElementById('oc-checkout');
-    if(ociCheckin) ociCheckin.onchange = ()=>{ modal.editCheckIn = ociCheckin.value; render(); };
-    if(ociCheckout) ociCheckout.onchange = ()=>{ modal.editCheckOut = ociCheckout.value; render(); };
-    const saveDatesBtn = document.getElementById('m-save-dates');
-    if(saveDatesBtn) saveDatesBtn.onclick = ()=>{
+    const editBtn = document.getElementById('m-edit-booking');
+    if(editBtn) editBtn.onclick = ()=>{
       const room = state.rooms.find(r=>r.id===modal.roomId);
-      const b = state.bookings[room.bookingId];
-      const ci = modal.editCheckIn || b.checkInDate;
-      const co = modal.editCheckOut || addDays(b.checkInDate,b.nights);
-      const n = daysBetween(ci, co);
-      if(n < 1){ alert('ວັນທີເຊັກເອົາທ໌ຕ້ອງຫຼັງວັນທີເຊັກອິນຢ່າງໜ້ອຍ 1 ຄືນ'); return; }
-      doSaveEdit(room.bookingId, {checkInDate:ci, nights:n});
+      openEditBookingModal(room.bookingId);
     };
     const settleMethodEl = document.getElementById('settle-method');
     if(settleMethodEl) settleMethodEl.onchange = ()=>{ modal.settleMethod = settleMethodEl.value; };
@@ -1844,6 +1792,11 @@ function attachHandlers(){
     const checkoutInput = document.getElementById('ef-checkout');
     if(checkinInput) checkinInput.onchange = ()=>{ modal.form.checkInDate = checkinInput.value; render(); };
     if(checkoutInput) checkoutInput.onchange = ()=>{ modal.form.checkOutDateExp = checkoutInput.value; render(); };
+    const priceInput = document.getElementById('ef-price');
+    if(priceInput){
+      priceInput.oninput = ()=>{ modal.form.pricePerNight = priceInput.value; };
+      priceInput.onchange = ()=>{ modal.form.pricePerNight = priceInput.value; render(); };
+    }
     bind('ef-guestname','guestName');
     bind('ef-gender','gender');
     bind('ef-doc','docNumber');
@@ -1869,8 +1822,11 @@ function attachHandlers(){
     if(saveBtn) saveBtn.onclick = ()=>{
       if(modal.form.checkInDate && modal.form.checkOutDateExp){
         const n = daysBetween(modal.form.checkInDate, modal.form.checkOutDateExp);
-        if(n < 1){ alert('ວັນທີເຊັກເອົາທ໌ຕ້ອງຫຼັງວັນທີເຊັກອິນຢ່າງໜ້ອຍ 1 ຄືນ'); return; }
-        modal.form.nights = n;
+        if(n < 0){ alert('ວັນທີເຊັກເອົາທ໌ຕ້ອງບໍ່ກ່ອນວັນທີເຊັກອິນ'); return; }
+        // Same-day check-in/out is a real case (a guest who stays briefly then leaves, freeing the
+        // room for same-day cleaning and re-letting) -- bill it as 1 night rather than rejecting it.
+        modal.form.shortStay = (n===0);
+        modal.form.nights = n===0 ? 1 : n;
       }
       doSaveEdit(modal.bookingId, modal.form);
     };
