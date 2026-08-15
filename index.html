@@ -934,7 +934,7 @@ function renderSearch(){
                 (!searchQuery.rangeFrom || stayEnd>=searchQuery.rangeFrom);
     }
     return nameOk && roomOk && ciOk && coOk && rangeOk;
-  }).sort((a,b)=> Number(a.roomId)-Number(b.roomId) || a.checkInDate.localeCompare(b.checkInDate) || (a.checkInTime||'').localeCompare(b.checkInTime||''));
+  }).sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
 
   const roomOptions = state.rooms.slice().sort((a,c)=>Number(a.id)-Number(c.id));
 
@@ -994,7 +994,7 @@ function renderSearch(){
 function bookingsForReportMonth(monthStr){
   return Object.values(state.bookings)
     .filter(b=>!b.voided && b.checkInDate && b.checkInDate.slice(0,7)===monthStr)
-    .sort((a,b)=> a.checkInDate.localeCompare(b.checkInDate) || (a.checkInTime||'').localeCompare(b.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
+    .sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
 }
 // A "ຕັ້ງແຕ່-ຫາ" search is an overlap search across ALL months (not just the one currently
 // selected) -- who was staying at any point in this window. An ongoing stay (no real checkOutDate
@@ -1006,7 +1006,7 @@ function bookingsForReportRange(fromDate, toDate){
       const stayEnd = b.checkOutDate || addDays(b.checkInDate, b.nights);
       return (!toDate || b.checkInDate<=toDate) && (!fromDate || stayEnd>=fromDate);
     })
-    .sort((a,b)=> a.checkInDate.localeCompare(b.checkInDate) || (a.checkInTime||'').localeCompare(b.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
+    .sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
 }
 // Only money actually received (settlements plus anything not still 'later'), the same rule the
 // rest of the app uses -- b.totalPrice alone would count still-unpaid amounts as if collected.
