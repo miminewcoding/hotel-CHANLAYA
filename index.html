@@ -447,6 +447,7 @@ const DIGITAL_PAY_TYPES = ['bcel','ldb','wechat'];
 /* ---------------- Excel report export ---------------- */
 const REPORT_ENDPOINT_URL = 'https://script.google.com/macros/s/AKfycbyrTF_bKtjfYtFtIoO2gVtAPFSZK_5j403xUBDVQsU_wcyMyYUIQC228Xp6sJSXhMre/exec';
 const REPORT_SECRET = 'LCnAJcARRVF9XG0oSAoBjYNSPwyh_ulj';
+const REPORT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1FWSCth47swVcXBPSqwwDIL8dhL3Ueyjp4-vNfjk_tQQ/edit?gid=0#gid=0';
 let reportSending = false;
 let reportStatusMsg = '';
 
@@ -556,6 +557,10 @@ async function sendReportToExcel(){
       pay: pt==='cash' ? 'cash' : (DIGITAL_PAY_TYPES.includes(pt) ? 'transfer' : 'other')
     };
   });
+  // Opened synchronously, still inside the click handler, so popup blockers don't kill it once
+  // the async fetch below resolves -- only redirected to the real sheet after a successful sync,
+  // and closed again if the sync fails, so a blocked/failed send never leaves a stray blank tab.
+  const sheetTab = window.open('', '_blank');
   reportSending = true; reportStatusMsg = `ກຳລັງສົ່ງ ${rows.length} ລາຍການ...`; render();
   try{
     const res = await fetch(REPORT_ENDPOINT_URL, {
@@ -568,10 +573,11 @@ async function sendReportToExcel(){
     state.revenueLog.forEach(e=>{ e.exportedToSheet = sentIds.has(e.id); });
     await saveState();
     reportStatusMsg = `ສົ່ງສຳເລັດ ${rows.length} ລາຍການ`;
-    alert(`ສົ່ງເຂົ້າ Excel ສຳເລັດ: ${data.added||0} ລາຍການໃໝ່, ${data.removed||0} ລາຍການທີ່ຍົກເລີກຖືກລຶບ`);
+    if(sheetTab) sheetTab.location.href = REPORT_SHEET_URL;
   }catch(err){
     console.error('report export failed', err);
     reportStatusMsg = '';
+    if(sheetTab) sheetTab.close();
     alert('ສົ່ງບໍ່ສຳເລັດ: ' + (err.message||err));
   }finally{
     reportSending = false; render();
