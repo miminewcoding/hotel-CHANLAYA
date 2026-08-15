@@ -923,14 +923,22 @@ function renderSearch(){
     const nameOk = !searchQuery.name || (b.guestName||'').toLowerCase().includes(searchQuery.name.toLowerCase());
     const roomOk = !searchQuery.room || b.roomId===searchQuery.room;
     // The date range filters on whichever single date field the dropdown picked (check-in or
-    // check-out), not a stay-overlap search -- picking "check-out" and a range shows exactly the
-    // rooms that checked out in that window, matching bookings that haven't actually checked out
-    // (checkOutDate still null) fails on purpose, same as before.
+    // check-out) -- picking "check-out" and a range shows exactly the rooms that checked out in
+    // that window, matching bookings that haven't actually checked out (checkOutDate still null)
+    // fails on purpose. "ລະຫວ່າງ" is the one exception: an overlap search (who was staying at any
+    // point in the window), falling back to the expected checkout for a still-ongoing stay so it
+    // still shows up when the window covers today.
     let rangeOk = true;
     if(searchQuery.rangeFrom || searchQuery.rangeTo){
-      const target = searchQuery.dateType==='checkout' ? b.checkOutDate : b.checkInDate;
-      rangeOk = !!target && (!searchQuery.rangeFrom || target>=searchQuery.rangeFrom) &&
-                (!searchQuery.rangeTo || target<=searchQuery.rangeTo);
+      if(searchQuery.dateType==='between'){
+        const stayEnd = b.checkOutDate || addDays(b.checkInDate, b.nights);
+        rangeOk = (!searchQuery.rangeTo || b.checkInDate<=searchQuery.rangeTo) &&
+                  (!searchQuery.rangeFrom || stayEnd>=searchQuery.rangeFrom);
+      } else {
+        const target = searchQuery.dateType==='checkout' ? b.checkOutDate : b.checkInDate;
+        rangeOk = !!target && (!searchQuery.rangeFrom || target>=searchQuery.rangeFrom) &&
+                  (!searchQuery.rangeTo || target<=searchQuery.rangeTo);
+      }
     }
     return nameOk && roomOk && rangeOk;
   }).sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
@@ -950,8 +958,9 @@ function renderSearch(){
       </div>
       <div class="field"><label>ຄົ້ນຫາຕາມ</label>
         <select id="s-date-type">
-          <option value="checkin" ${searchQuery.dateType!=='checkout'?'selected':''}>ວັນທີເຊັກອິນ</option>
+          <option value="checkin" ${searchQuery.dateType==='checkin'||!searchQuery.dateType?'selected':''}>ວັນທີເຊັກອິນ</option>
           <option value="checkout" ${searchQuery.dateType==='checkout'?'selected':''}>ວັນທີເຊັກເອົາທ໌</option>
+          <option value="between" ${searchQuery.dateType==='between'?'selected':''}>ລະຫວ່າງ</option>
         </select>
       </div>
       <div class="field"><label>ຊ່ວງວັນທີ ຕັ້ງແຕ່</label><input id="s-range-from" type="date" value="${searchQuery.rangeFrom}"></div>
