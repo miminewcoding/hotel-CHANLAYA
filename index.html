@@ -187,10 +187,14 @@
     border-top:3px solid var(--brass);box-shadow:0 -6px 20px rgba(28,36,32,0.25);
     padding:12px 22px;display:flex;justify-content:center;gap:clamp(14px,4vw,36px);flex-wrap:wrap;
   }
-  .report-sticky-bar .item{display:flex;flex-direction:column;align-items:center;gap:2px;}
+  .report-sticky-bar .item{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;}
   .report-sticky-bar .item .label{font-size:11px;color:#C9C2B3;letter-spacing:.02em;}
-  .report-sticky-bar .item .value{font-family:'Fraunces',serif;font-size:19px;color:var(--brass);}
+  .report-sticky-bar .item .value{font-family:'Fraunces',serif;font-size:19px;color:var(--brass);white-space:nowrap;}
   .report-sticky-bar .item.grand .value{font-size:23px;}
+  /* The grand total's label spells out the whole period, which is far too wide to keep four
+     figures on one line on a phone -- so the bar carries a short label too and swaps to it
+     below 640px, where the bar also becomes a fixed 4-column grid that can never wrap. */
+  .bar-label-short{display:none;}
 
   .btn{
     font-family:inherit;font-size:13.5px;font-weight:600;
@@ -265,10 +269,23 @@
     .btn{padding:10px 14px;font-size:13px;}
     table{font-size:12px;}
     th,td{padding:7px 8px;}
+    .report-sticky-bar{
+      display:grid;grid-template-columns:repeat(4,1fr);
+      gap:4px;padding:9px 8px;align-items:end;justify-items:center;
+    }
+    .report-sticky-bar .item .label{font-size:9.5px;text-align:center;line-height:1.2;}
+    .report-sticky-bar .item .value{font-size:13px;}
+    .report-sticky-bar .item.grand .value{font-size:15px;}
+    .bar-label-full{display:none;}
+    .bar-label-short{display:inline;}
   }
   @media (max-width:400px){
     .room-grid{grid-template-columns:repeat(auto-fill,minmax(94px,1fr));gap:8px;}
     .brand-text .title{font-size:15px;}
+    .report-sticky-bar{gap:2px;padding:8px 4px;}
+    .report-sticky-bar .item .label{font-size:9px;}
+    .report-sticky-bar .item .value{font-size:11.5px;}
+    .report-sticky-bar .item.grand .value{font-size:13px;}
   }
 </style>
 </head>
@@ -324,17 +341,20 @@ function natMatches(query){
   }
   return starts.concat(contains).slice(0,12);
 }
-function wireNatAutocomplete(inputId, resultsId, prop, onPicked){
+// `target` says which object the picked nationality is written back to; it defaults to the open
+// modal's form, which is every caller except the blacklist page (it has no modal behind it).
+function wireNatAutocomplete(inputId, resultsId, prop, onPicked, target){
   const el = document.getElementById(inputId);
   const box = document.getElementById(resultsId);
   if(!el || !box) return;
+  const store = ()=> target || modal.form;
   const renderResults = ()=>{
     const matches = natMatches(el.value);
     if(!matches.length){ box.classList.remove('show'); box.innerHTML=''; return; }
     box.innerHTML = matches.map(m=>`<div data-name="${m.n.replace(/"/g,'&quot;')}"><span>${m.n}</span><span class="abbr">${m.c}</span></div>`).join('');
     box.classList.add('show');
   };
-  el.oninput = ()=>{ modal.form[prop] = el.value; renderResults(); };
+  el.oninput = ()=>{ store()[prop] = el.value; renderResults(); };
   el.onfocus = ()=>{ renderResults(); };
   el.onblur = ()=>{ setTimeout(()=>{ box.classList.remove('show'); box.innerHTML=''; }, 150); };
   box.onmousedown = (e)=>{
@@ -342,7 +362,7 @@ function wireNatAutocomplete(inputId, resultsId, prop, onPicked){
     if(!row) return;
     e.preventDefault();
     el.value = row.dataset.name;
-    modal.form[prop] = row.dataset.name;
+    store()[prop] = row.dataset.name;
     box.classList.remove('show');
     box.innerHTML = '';
     if(onPicked) onPicked();
@@ -394,7 +414,14 @@ function autoExtendOverdueRooms(){
 let state = null;
 let view = 'grid';
 let modal = null;
-let searchQuery = {name:'', room:'', dateType:'checkin', rangeFrom:'', rangeTo:''};
+// dateType starts empty on purpose: the mode dropdown is what decides what the search page shows
+// at all, so nothing is listed until staff pick one deliberately.
+let searchQuery = {name:'', room:'', dateType:'', rangeFrom:'', rangeTo:''};
+let searchError = '';
+// Kept outside the DOM because render() rebuilds the whole page on every state change -- an
+// unsaved blacklist form typed straight into the inputs would be wiped by the next Firestore tick.
+let blacklistForm = {name:'', docNumber:'', phone:'', nationality:'', reason:''};
+let blacklistNotice = '';
 let reportMonth = todayStr().slice(0,7);
 let reportRangeFrom = '';
 let reportRangeTo = '';
@@ -408,10 +435,13 @@ function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(
 
 function defaultState(){
   const rooms = ROOMS_DEF.map(r=>({id:r.id, floor:r.floor, type:r.type, price:r.price, status:'available', bookingId:null}));
-  return {rooms, bookings:{}, revenueLog:[]};
+  return {rooms, bookings:{}, revenueLog:[], blacklist:[]};
 }
 
 function migrateState(s){
+  // Backfilled here rather than assumed, so every pre-blacklist save (and every restored backup
+  // taken before this feature existed) loads without the blacklist page throwing.
+  if(!Array.isArray(s.blacklist)) s.blacklist = [];
   s.rooms.forEach(r=>{ if(!('bookingId' in r)) r.bookingId=null; });
   Object.values(s.bookings).forEach(b=>{
     if(b.voided===undefined) b.voided=false;
@@ -443,6 +473,64 @@ function payLabel(pt){
   return '-';
 }
 const DIGITAL_PAY_TYPES = ['bcel','ldb','wechat'];
+
+/* ---------------- Blacklist ---------------- */
+// Blacklist rows are free text typed by staff (a reason can contain anything), so unlike the
+// booking fields around them they get escaped before going anywhere near innerHTML.
+function esc(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function normName(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
+// Document numbers get written with spaces, dashes and mixed case depending on who typed them,
+// so compare only the alphanumerics -- "AB 123-456" and "ab123456" are the same passport.
+function normDoc(s){ return String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function blacklistMatches(name, docNumber){
+  const n = normName(name), d = normDoc(docNumber);
+  if(!n && !d) return [];
+  return (state.blacklist||[]).filter(e =>
+    (d && normDoc(e.docNumber) === d) || (n && normName(e.name) === n)
+  );
+}
+function blacklistWarnHtml(name, docNumber){
+  const hits = blacklistMatches(name, docNumber);
+  if(!hits.length) return '';
+  return `<div class="alert warn" style="margin-top:10px;">
+    <span>🚫</span>
+    <div><b>ລູກຄ້ານີ້ຢູ່ໃນ Blacklist</b>${hits.map(h=>`
+      <div style="margin-top:4px;">${esc(h.name)||'-'}${h.docNumber?' · '+esc(h.docNumber):''}${h.reason?' — '+esc(h.reason):''}</div>`).join('')}
+      <div style="margin-top:6px;font-size:12px;">ຍັງເຊັກອິນຕໍ່ໄດ້ ແຕ່ຕ້ອງກົດຢືນຢັນອີກຄັ້ງ</div></div>
+  </div>`;
+}
+function doAddBlacklist(entry){
+  state.blacklist.push({
+    id: uid(),
+    name: (entry.name||'').trim(),
+    docNumber: (entry.docNumber||'').trim(),
+    phone: (entry.phone||'').trim(),
+    nationality: (entry.nationality||'').trim(),
+    reason: (entry.reason||'').trim(),
+    addedDate: todayStr(),
+    addedTime: nowTimeStr()
+  });
+  saveState();
+  blacklistForm = {name:'', docNumber:'', phone:'', nationality:'', reason:''};
+  render();
+}
+// Warns but never blocks: a blacklisted guest can still be checked in, it just takes a second,
+// deliberate confirmation so it can't happen by reflex.
+function confirmBlacklistCheckin(form){
+  const hits = blacklistMatches(form.guestName, form.docNumber);
+  if(!hits.length) return true;
+  const lines = hits.map(h=>`• ${h.name||'-'}${h.docNumber?' · '+h.docNumber:''}${h.reason?' — '+h.reason:''}`).join('\n');
+  return confirm(`🚫 ລູກຄ້ານີ້ຢູ່ໃນ Blacklist\n\n${lines}\n\nຕ້ອງການເຊັກອິນຕໍ່ບໍ?`);
+}
+function doRemoveBlacklist(id){
+  const idx = (state.blacklist||[]).findIndex(e=>e.id===id);
+  if(idx < 0) return;
+  state.blacklist.splice(idx,1);
+  saveState();
+  render();
+}
 
 /* ---------------- Excel report export ---------------- */
 const REPORT_ENDPOINT_URL = 'https://script.google.com/macros/s/AKfycbyBIgBqjE1U2S6PV2QjogorC1hjjtdGR1UGKxKqTeuHPsEbaWFnPVUhWj12OLeF5EMT/exec';
@@ -586,7 +674,7 @@ async function sendReportToExcel(){
 
 /* ---------------- Actions (all append-only; nothing is ever removed) ---------------- */
 // Splits a multi-night charge into one revenueLog entry per night, dated the night it actually
-// covers -- so daily reports (ລາຍງານ) show this room's revenue on every date of the stay, not
+// covers -- so the daily figures on ການເງິນ show this room's revenue on every date of the stay, not
 // lumped onto whichever day it happened to be logged.
 function pushNightlyRevenue(bookingId, roomId, guestName, startDate, nights, pricePerNight, time, paymentType, kind){
   for(let i=0;i<nights;i++){
@@ -826,7 +914,7 @@ function render(){
 }
 
 function renderConsole(){
-  const tabs = [['grid','ຜັງຫ້ອງພັກ'],['search','ຄົ້ນຫາ / ຈັດການ'],['reports','ລາຍງານ']];
+  const tabs = [['grid','ຜັງຫ້ອງພັກ'],['search','ຄົ້ນຫາ / ຈັດການ'],['reports','ການເງິນ']];
   return `
   <div class="console">
     <div class="brand">
@@ -918,8 +1006,61 @@ function renderGrid(){
   }).join('');
 }
 
+// The mode dropdown is the gate for this whole page: nothing below it renders until a mode is
+// picked, and picking "blacklist" swaps the stay search out for the blacklist manager entirely.
 function renderSearch(){
-  const results = Object.values(state.bookings).filter(b=>{
+  const mode = searchQuery.dateType || '';
+  const modeField = `
+      <div class="field"><label>ໂໝດການຄົ້ນຫາ <span class="req">*</span></label>
+        <select id="s-date-type">
+          <option value="" ${!mode?'selected':''}>— ເລືອກໂໝດ —</option>
+          <option value="checkin" ${mode==='checkin'?'selected':''}>ວັນທີເຊັກອິນ</option>
+          <option value="checkout" ${mode==='checkout'?'selected':''}>ວັນທີເຊັກເອົາທ໌</option>
+          <option value="between" ${mode==='between'?'selected':''}>ລະຫວ່າງ</option>
+          <option value="blacklist" ${mode==='blacklist'?'selected':''}>🚫 Blacklist${(state.blacklist||[]).length?` (${state.blacklist.length})`:''}</option>
+        </select>
+      </div>`;
+
+  if(mode==='blacklist'){
+    return `
+    <div class="panel">
+      <h2>ຄົ້ນຫາ / ຈັດການຂໍ້ມູນການເຂົ້າພັກ</h2>
+      <div class="field-grid">${modeField}</div>
+      <p style="font-size:12px;color:var(--text-mute);margin-top:12px;">ປ່ຽນໂໝດຄືນເພື່ອກັບໄປຄົ້ນຫາການເຂົ້າພັກ</p>
+    </div>` + renderBlacklistPanel();
+  }
+
+  const results = mode ? searchResults() : [];
+  const roomOptions = state.rooms.slice().sort((a,c)=>Number(a.id)-Number(c.id));
+
+  return `
+  <div class="panel">
+    <h2>ຄົ້ນຫາ / ຈັດການຂໍ້ມູນການເຂົ້າພັກ</h2>
+    ${searchError ? `<div class="alert warn"><span>⚠️</span><div>${searchError}</div></div>` : ''}
+    <div class="field-grid">
+      <div class="field"><label>ຊື່-ນາມສະກຸນ</label><input id="s-name" value="${searchQuery.name}" placeholder="ພິມບາງສ່ວນຂອງຊື່"></div>
+      <div class="field"><label>ຫ້ອງ</label>
+        <select id="s-room">
+          <option value="">— ທຸກຫ້ອງ —</option>
+          ${roomOptions.map(r=>`<option value="${r.id}" ${searchQuery.room===r.id?'selected':''}>${r.id}</option>`).join('')}
+        </select>
+      </div>
+      ${modeField}
+      <div class="field"><label>ຊ່ວງວັນທີ ຕັ້ງແຕ່</label><input id="s-range-from" type="date" value="${searchQuery.rangeFrom}"></div>
+      <div class="field"><label>ຫາວັນທີ</label><input id="s-range-to" type="date" value="${searchQuery.rangeTo}"></div>
+      <div class="field" style="justify-content:flex-end;"><button class="btn btn-primary" id="s-run">ຄົ້ນຫາ</button></div>
+      <div class="field" style="justify-content:flex-end;"><button class="btn btn-ghost" id="s-clear">ລ້າງການຄົ້ນຫາ</button></div>
+    </div>
+    <p style="font-size:12px;color:var(--text-mute);margin-top:12px;">ຕ້ອງເລືອກໂໝດການຄົ້ນຫາກ່ອນ — ຊ່ອງອື່ນຕື່ມບາງຊ່ອງຫຼືທັງຫມົດກໍ່ໄດ້.</p>
+  </div>
+  ${!mode ? `
+  <div class="panel">
+    <div class="empty">ກະລຸນາເລືອກໂໝດການຄົ້ນຫາຂ້າງເທິງກ່ອນ ຈຶ່ງຈະສະແດງຜົນລັບ</div>
+  </div>` : renderSearchResults(results)}`;
+}
+
+function searchResults(){
+  return Object.values(state.bookings).filter(b=>{
     const nameOk = !searchQuery.name || (b.guestName||'').toLowerCase().includes(searchQuery.name.toLowerCase());
     const roomOk = !searchQuery.room || b.roomId===searchQuery.room;
     // The date range filters on whichever single date field the dropdown picked (check-in or
@@ -942,34 +1083,10 @@ function renderSearch(){
     }
     return nameOk && roomOk && rangeOk;
   }).sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
+}
 
-  const roomOptions = state.rooms.slice().sort((a,c)=>Number(a.id)-Number(c.id));
-
+function renderSearchResults(results){
   return `
-  <div class="panel">
-    <h2>ຄົ້ນຫາ / ຈັດການຂໍ້ມູນການເຂົ້າພັກ</h2>
-    <div class="field-grid">
-      <div class="field"><label>ຊື່-ນາມສະກຸນ</label><input id="s-name" value="${searchQuery.name}" placeholder="ພິມບາງສ່ວນຂອງຊື່"></div>
-      <div class="field"><label>ຫ້ອງ</label>
-        <select id="s-room">
-          <option value="">— ທຸກຫ້ອງ —</option>
-          ${roomOptions.map(r=>`<option value="${r.id}" ${searchQuery.room===r.id?'selected':''}>${r.id}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field"><label>ຄົ້ນຫາຕາມ</label>
-        <select id="s-date-type">
-          <option value="checkin" ${searchQuery.dateType==='checkin'||!searchQuery.dateType?'selected':''}>ວັນທີເຊັກອິນ</option>
-          <option value="checkout" ${searchQuery.dateType==='checkout'?'selected':''}>ວັນທີເຊັກເອົາທ໌</option>
-          <option value="between" ${searchQuery.dateType==='between'?'selected':''}>ລະຫວ່າງ</option>
-        </select>
-      </div>
-      <div class="field"><label>ຊ່ວງວັນທີ ຕັ້ງແຕ່</label><input id="s-range-from" type="date" value="${searchQuery.rangeFrom}"></div>
-      <div class="field"><label>ຫາວັນທີ</label><input id="s-range-to" type="date" value="${searchQuery.rangeTo}"></div>
-      <div class="field" style="justify-content:flex-end;"><button class="btn btn-primary" id="s-run">ຄົ້ນຫາ</button></div>
-      <div class="field" style="justify-content:flex-end;"><button class="btn btn-ghost" id="s-clear">ລ້າງການຄົ້ນຫາ</button></div>
-    </div>
-    <p style="font-size:12px;color:var(--text-mute);margin-top:12px;">ຕື່ມຊ່ອງບາງຊ່ອງຫຼືທັງຫມົດ.</p>
-  </div>
   <div class="panel">
     <h2>ຜົນລັບ (${results.length})</h2>
     ${results.length===0 ? '<div class="empty">ບໍ່ພົບຂໍ້ມູນ</div>' : `
@@ -992,9 +1109,60 @@ function renderSearch(){
             <td class="row-actions">
               <button class="btn btn-ghost btn-sm" data-edit="${b.id}">✏️ ແກ້ໄຂ</button>
               ${b.groupId ? `<button class="btn btn-ghost btn-sm" data-bill="${b.groupId}">ໃບບິນລວມ</button>` : ''}
+              ${blacklistMatches(b.guestName, b.docNumber).length
+                ? `<span class="badge void" title="ຢູ່ໃນ Blacklist ແລ້ວ">🚫 Blacklist</span>`
+                : `<button class="btn btn-ghost btn-sm" data-blacklist-add="${b.id}">🚫 ເພີ່ມ Blacklist</button>`}
               ${b.voided?'':`<button class="btn btn-danger btn-sm" data-void="${b.id}">ຍົກເລີກ</button>`}
             </td>
           </tr>`;}).join('')}
+      </tbody>
+    </table>
+    </div>`}
+  </div>`;
+}
+
+function renderBlacklistPanel(){
+  const list = (state.blacklist||[]).slice().sort((a,b)=>
+    (b.addedDate||'').localeCompare(a.addedDate||'') || (b.addedTime||'').localeCompare(a.addedTime||''));
+  const f = blacklistForm;
+  const canSave = !!((f.name||'').trim() || (f.docNumber||'').trim());
+  return `
+  <div class="panel">
+    <h2>🚫 ເພີ່ມລູກຄ້າເຂົ້າ Blacklist</h2>
+    ${blacklistNotice ? `<div class="alert info"><span>ℹ️</span><div>${blacklistNotice}</div></div>` : ''}
+    <div class="field-grid">
+      <div class="field"><label>ຊື່-ນາມສະກຸນ</label><input id="bl-name" value="${esc(f.name)}"></div>
+      <div class="field"><label>ເລກບັດປະຈຳຕົວ / ພາສປອດ</label><input id="bl-doc" value="${esc(f.docNumber)}"></div>
+      <div class="field"><label>ເບີໂທລະສັບ</label><input id="bl-phone" value="${esc(f.phone)}"></div>
+      <div class="field nat-field"><label>ສັນຊາດ</label>
+        <input id="bl-nat" autocomplete="off" placeholder="ພິມຕົວຫຍໍ້ ເຊັ່ນ LAO, THA, USA..." value="${esc(f.nationality)}">
+        <div class="nat-results" id="bl-nat-results"></div>
+      </div>
+      <div class="field full"><label>ເຫດຜົນ</label><input id="bl-reason" value="${esc(f.reason)}" placeholder="ເຊັ່ນ: ບໍ່ຈ່າຍຄ່າຫ້ອງ, ທຳລາຍຊັບສິນ..."></div>
+    </div>
+    <p style="font-size:11.5px;color:var(--text-mute);margin-top:12px;">ຕ້ອງມີຢ່າງໜ້ອຍ ຊື່ ຫຼື ເລກບັດ/ພາສປອດ — ສອງຊ່ອງນີ້ຄືສິ່ງທີ່ລະບົບໃຊ້ກວດຕອນເຊັກອິນ</p>
+    <div class="btn-row">
+      <button class="btn btn-ghost" id="bl-clear">ລ້າງຟອມ</button>
+      <button class="btn btn-primary" id="bl-add" ${canSave?'':'disabled'}>ເພີ່ມເຂົ້າ Blacklist</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>ລາຍຊື່ໃນ Blacklist (${list.length})</h2>
+    ${list.length===0 ? '<div class="empty">ຍັງບໍ່ມີລາຍຊື່ໃນ Blacklist</div>' : `
+    <div class="table-scroll">
+    <table>
+      <thead><tr><th>ຊື່ລູກຄ້າ</th><th>ເລກບັດ/ພາສປອດ</th><th>ເບີໂທ</th><th>ສັນຊາດ</th><th>ເຫດຜົນ</th><th>ວັນທີເພີ່ມ</th><th>ຈັດການ</th></tr></thead>
+      <tbody>
+        ${list.map(e=>`
+          <tr>
+            <td>${esc(e.name)||'-'}</td>
+            <td>${esc(e.docNumber)||'-'}</td>
+            <td>${esc(e.phone)||'-'}</td>
+            <td>${esc(e.nationality)||'-'}</td>
+            <td>${esc(e.reason)||'-'}</td>
+            <td>${fmtDate(e.addedDate)}${e.addedTime?' · '+esc(e.addedTime):''}</td>
+            <td class="row-actions"><button class="btn btn-danger btn-sm" data-blacklist-del="${e.id}">ລຶບອອກ</button></td>
+          </tr>`).join('')}
       </tbody>
     </table>
     </div>`}
@@ -1047,7 +1215,7 @@ function renderReports(){
   <div class="panel" style="margin-bottom:100px;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px;">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <h2 style="margin:0;">ລາຍງານລາຍຮັບ</h2>
+        <h2 style="margin:0;">ການເງິນ — ລາຍຮັບ</h2>
         <input type="month" id="r-month" value="${reportMonth}">
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
@@ -1083,7 +1251,7 @@ function renderReports(){
     </div>`}
   </div>
   <div class="report-sticky-bar">
-    <div class="item grand"><div class="label">${grandLabel}</div><div class="value num">${fmtMoney(grand)}</div></div>
+    <div class="item grand"><div class="label"><span class="bar-label-full">${grandLabel}</span><span class="bar-label-short">ລວມທັງໝົດ</span></div><div class="value num">${fmtMoney(grand)}</div></div>
     <div class="item"><div class="label">BCEL</div><div class="value num">${fmtMoney(bcelSum)}</div></div>
     <div class="item"><div class="label">LDB</div><div class="value num">${fmtMoney(ldbSum)}</div></div>
     <div class="item"><div class="label">WeChat</div><div class="value num">${fmtMoney(wechatSum)}</div></div>
@@ -1115,6 +1283,7 @@ function renderCheckinModal(){
       <button class="modal-close" id="m-close">✕</button>
       <h2>ເປີດຫ້ອງ ${room.id} — Check-in</h2>
       <p style="font-size:11.5px;color:var(--text-mute);margin-top:-6px;">ບໍ່ຈຳເປັນຕ້ອງຕື່ມທຸກຊ່ອງ — ຂ້າມຊ່ອງໃດກໍ່ໄດ້ ແລ້ວກົດຢືນຢັນໄດ້ເລີຍ</p>
+      <div id="f-blacklist-warn">${blacklistWarnHtml(f.guestName, f.docNumber)}</div>
       <div class="field-grid">
         <div class="field">
           <label>ຜູ້ຮັບແຂກ/ຜູ້ບັນທຶກຂໍ້ມູນ</label>
@@ -1195,6 +1364,7 @@ function renderGroupCheckinModal(){
       <button class="modal-close" id="m-close">✕</button>
       <h2>ເຊັກອິນ ${rooms.length} ຫ້ອງ (ອົງກອນ) — ${rooms.map(r=>r.id).join(', ')}</h2>
       <p style="font-size:11.5px;color:var(--text-mute);margin-top:-6px;">ຂໍ້ມູນນີ້ຈະໃຊ້ຮ່ວມກັນທຸກຫ້ອງທີ່ເລືອກ — ບໍ່ຈຳເປັນຕ້ອງຕື່ມທຸກຊ່ອງ</p>
+      <div id="f-blacklist-warn">${blacklistWarnHtml(f.guestName, f.docNumber)}</div>
       <div class="field-grid">
         <div class="field">
           <label>ຜູ້ຮັບແຂກ/ຜູ້ບັນທຶກຂໍ້ມູນ</label>
@@ -1496,6 +1666,10 @@ function updateCheckinLive(source){
   if(ciEl && source!=='cidate') ciEl.value = f.ciDate;
   const wechatWrap = document.getElementById('f-wechat-wrap');
   if(wechatWrap) wechatWrap.style.display = f.paymentType==='wechat' ? 'flex' : 'none';
+  // Patched in here rather than via render(), so the warning appears as the name/document is
+  // typed without the full re-render blowing away the field the user is still in.
+  const blWarn = document.getElementById('f-blacklist-warn');
+  if(blWarn) blWarn.innerHTML = blacklistWarnHtml(f.guestName, f.docNumber);
 }
 function updateGroupCheckinLive(source){
   if(!modal || modal.type!=='groupCheckin') return;
@@ -1532,12 +1706,16 @@ function updateGroupCheckinLive(source){
   if(ciEl && source!=='cidate') ciEl.value = f.ciDate;
   const wechatWrap = document.getElementById('f-wechat-wrap');
   if(wechatWrap) wechatWrap.style.display = f.paymentType==='wechat' ? 'flex' : 'none';
+  // Patched in here rather than via render(), so the warning appears as the name/document is
+  // typed without the full re-render blowing away the field the user is still in.
+  const blWarn = document.getElementById('f-blacklist-warn');
+  if(blWarn) blWarn.innerHTML = blacklistWarnHtml(f.guestName, f.docNumber);
 }
 
 /* ---------------- Event wiring ---------------- */
 function attachHandlers(){
   document.querySelectorAll('[data-nav]').forEach(el=>{
-    el.onclick = ()=>{ view = el.dataset.nav; modal=null; selectMode=false; selectedRooms=[]; render(); };
+    el.onclick = ()=>{ view = el.dataset.nav; modal=null; selectMode=false; selectedRooms=[]; searchError=''; render(); };
   });
 
   const exportBtn = document.getElementById('export-btn');
@@ -1596,30 +1774,104 @@ function attachHandlers(){
   };
 
   // search
+  const readSearchInputs = ()=>{
+    searchQuery.name = document.getElementById('s-name')?.value ?? searchQuery.name;
+    searchQuery.room = document.getElementById('s-room')?.value ?? searchQuery.room;
+    searchQuery.dateType = document.getElementById('s-date-type')?.value || '';
+    searchQuery.rangeFrom = document.getElementById('s-range-from')?.value ?? searchQuery.rangeFrom;
+    searchQuery.rangeTo = document.getElementById('s-range-to')?.value ?? searchQuery.rangeTo;
+  };
   const runSearch = ()=>{
-    searchQuery.name = document.getElementById('s-name')?.value || '';
-    searchQuery.room = document.getElementById('s-room')?.value || '';
-    searchQuery.dateType = document.getElementById('s-date-type')?.value || 'checkin';
-    searchQuery.rangeFrom = document.getElementById('s-range-from')?.value || '';
-    searchQuery.rangeTo = document.getElementById('s-range-to')?.value || '';
+    readSearchInputs();
+    if(!searchQuery.dateType){ searchError = 'ກະລຸນາເລືອກໂໝດ'; render(); return; }
+    searchError = '';
     render();
   };
   const sRun = document.getElementById('s-run');
   if(sRun) sRun.onclick = runSearch;
   const sClear = document.getElementById('s-clear');
   if(sClear) sClear.onclick = ()=>{
-    searchQuery = {name:'', room:'', dateType:'checkin', rangeFrom:'', rangeTo:''};
+    searchQuery = {name:'', room:'', dateType:'', rangeFrom:'', rangeTo:''};
+    searchError = '';
     render();
   };
-  // Room/date-type are dropdowns and the dates are discrete picks, not free typing -- search
-  // immediately on selection so the room "shortcut" the user asked for doesn't need a separate
-  // button press too.
-  ['s-room','s-date-type','s-range-from','s-range-to'].forEach(id=>{
+  // Switching mode always re-renders, because the mode is what decides whether this page shows the
+  // stay results, the blacklist manager, or nothing at all.
+  const sDateType = document.getElementById('s-date-type');
+  if(sDateType) sDateType.onchange = ()=>{
+    readSearchInputs();
+    searchError = '';
+    blacklistNotice = '';
+    render();
+  };
+  // Room and the dates are discrete picks, not free typing -- search immediately on selection so
+  // the room "shortcut" doesn't need a separate button press too. Before a mode is picked they
+  // just remember what was chosen: the "ກະລຸນາເລືອກໂໝດ" error belongs to pressing ຄົ້ນຫາ, not to
+  // touching a field.
+  ['s-room','s-range-from','s-range-to'].forEach(id=>{
     const el = document.getElementById(id);
-    if(el) el.onchange = runSearch;
+    if(el) el.onchange = ()=>{ readSearchInputs(); if(searchQuery.dateType){ searchError=''; render(); } };
   });
   const sName = document.getElementById('s-name');
   if(sName) sName.onkeydown = (e)=>{ if(e.key==='Enter') runSearch(); };
+
+  // blacklist page
+  const blBind = (id, prop)=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.oninput = ()=>{
+      blacklistForm[prop] = el.value;
+      // Only the save button's enabled state depends on what's typed, so patch that directly
+      // instead of re-rendering the panel out from under the field being typed into.
+      const addBtn = document.getElementById('bl-add');
+      if(addBtn) addBtn.disabled = !((blacklistForm.name||'').trim() || (blacklistForm.docNumber||'').trim());
+    };
+  };
+  blBind('bl-name','name');
+  blBind('bl-doc','docNumber');
+  blBind('bl-phone','phone');
+  blBind('bl-reason','reason');
+  wireNatAutocomplete('bl-nat','bl-nat-results','nationality', null, blacklistForm);
+  const blAdd = document.getElementById('bl-add');
+  if(blAdd) blAdd.onclick = ()=>{
+    if(!((blacklistForm.name||'').trim() || (blacklistForm.docNumber||'').trim())){
+      alert('ຕ້ອງມີຢ່າງໜ້ອຍ ຊື່ ຫຼື ເລກບັດ/ພາສປອດ');
+      return;
+    }
+    blacklistNotice = '';
+    doAddBlacklist(blacklistForm);
+  };
+  const blClear = document.getElementById('bl-clear');
+  if(blClear) blClear.onclick = ()=>{
+    blacklistForm = {name:'', docNumber:'', phone:'', nationality:'', reason:''};
+    blacklistNotice = '';
+    render();
+  };
+  document.querySelectorAll('[data-blacklist-del]').forEach(el=>{
+    el.onclick = ()=>{
+      const entry = (state.blacklist||[]).find(e=>e.id===el.dataset.blacklistDel);
+      if(!entry) return;
+      if(confirm(`ລຶບ "${entry.name||entry.docNumber||'-'}" ອອກຈາກ Blacklist?`)){
+        doRemoveBlacklist(entry.id);
+      }
+    };
+  });
+  // Prefills the blacklist form from the booking, then switches the page over to it so staff only
+  // have to type the reason. Nothing is saved until they press ເພີ່ມເຂົ້າ Blacklist.
+  document.querySelectorAll('[data-blacklist-add]').forEach(el=>{
+    el.onclick = ()=>{
+      const b = state.bookings[el.dataset.blacklistAdd];
+      if(!b) return;
+      blacklistForm = {
+        name: b.guestName||'', docNumber: b.docNumber||'', phone: b.phone||'',
+        nationality: b.nationality||'', reason: ''
+      };
+      blacklistNotice = `ດຶງຂໍ້ມູນຈາກການເຂົ້າພັກຫ້ອງ ${b.roomId} ມາໃຫ້ແລ້ວ — ຕື່ມເຫດຜົນ ແລ້ວກົດ "ເພີ່ມເຂົ້າ Blacklist"`;
+      searchQuery.dateType = 'blacklist';
+      searchError = '';
+      render();
+    };
+  });
   document.querySelectorAll('[data-edit]').forEach(el=>{
     el.onclick = ()=> openEditBookingModal(el.dataset.edit);
   });
@@ -1700,7 +1952,10 @@ function attachHandlers(){
     if(payWechat) payWechat.onchange = ()=>{ modal.form.paymentType='wechat'; updateCheckinLive(); };
     if(payLater) payLater.onchange = ()=>{ modal.form.paymentType='later'; updateCheckinLive(); };
     const submit = document.getElementById('m-submit');
-    if(submit) submit.onclick = ()=>{ doCheckin(modal.roomId, modal.form); };
+    if(submit) submit.onclick = ()=>{
+      if(!confirmBlacklistCheckin(modal.form)) return;
+      doCheckin(modal.roomId, modal.form);
+    };
   }
 
   if(modal && modal.type==='groupCheckin'){
@@ -1742,6 +1997,7 @@ function attachHandlers(){
     if(payLater) payLater.onchange = ()=>{ modal.form.paymentType='later'; updateGroupCheckinLive(); };
     const submitGroup = document.getElementById('m-submit-group');
     if(submitGroup) submitGroup.onclick = ()=>{
+      if(!confirmBlacklistCheckin(modal.form)) return;
       doGroupCheckin(modal.roomIds, modal.form);
       selectMode=false; selectedRooms=[];
       modal=null; render();
