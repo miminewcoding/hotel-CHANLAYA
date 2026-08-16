@@ -445,6 +445,10 @@ function migrateState(s){
   s.rooms.forEach(r=>{ if(!('bookingId' in r)) r.bookingId=null; });
   Object.values(s.bookings).forEach(b=>{
     if(b.voided===undefined) b.voided=false;
+    // `voided` is now what puts a booking in the trash, so every stay that was cancelled under the
+    // old "ຍົກເລີກ" wording is already sitting in there -- it just needs a deletion date to show.
+    if(b.voided && !b.deletedAt) b.deletedAt = b.voidedAt || b.checkInDate || todayStr();
+    if(b.deleteTracked===undefined) b.deleteTracked=false;
     if(b.checkInTime===undefined) b.checkInTime='';
     if(b.checkOutTime===undefined) b.checkOutTime='';
     if(b.paymentType==='now') b.paymentType='cash';
@@ -870,19 +874,89 @@ function openEditBookingModal(bookingId){
   render();
 }
 
-function doVoidBooking(bookingId){
+/* ---------------- Trash (delete / restore / purge) ---------------- */
+// Deleting moves a stay to the trash rather than erasing it: it drops out of the search page and
+// its money drops out of ການເງິນ (and off the Excel sheet on the next sync, since entriesToSync
+// only sends live entries), but everything is still there to be restored until the trash is emptied.
+function trashedBookings(){
+  return Object.values(state.bookings).filter(b=>b.voided)
+    .sort((a,b)=> (b.deletedAt||'').localeCompare(a.deletedAt||'') || (b.deletedTime||'').localeCompare(a.deletedTime||''));
+}
+function doDeleteBooking(bookingId){
   const b = state.bookings[bookingId];
-  if(b.voided) return;
+  if(!b || b.voided) return;
   b.voided = true;
   b.voidedAt = todayStr();
-  state.revenueLog.forEach(e=>{ if(e.bookingId===bookingId) e.voided = true; });
+  b.deletedAt = todayStr();
+  b.deletedTime = nowTimeStr();
+  // Only the entries that were still live get marked, so a later restore brings back exactly the
+  // money this delete took away -- and never resurrects nights that an earlier date correction
+  // had already voided on purpose.
+  b.deleteTracked = true;
+  state.revenueLog.forEach(e=>{
+    if(e.bookingId===bookingId && !e.voided){ e.voided = true; e.deletedWithBooking = true; }
+  });
   const room = state.rooms.find(r=>r.id===b.roomId);
   if(room && room.bookingId===bookingId){
+    b.deletedRoomStatus = room.status; // so restoring can hand the room back exactly as it was
     room.status = 'available';
     room.bookingId = null;
   }
   saveState();
   modal=null; render();
+}
+// Returns a note when the room could not be handed back, so the caller can say so out loud rather
+// than silently restoring a stay whose room now belongs to somebody else.
+function doRestoreBooking(bookingId){
+  const b = state.bookings[bookingId];
+  if(!b || !b.voided) return '';
+  b.voided = false;
+  delete b.voidedAt;
+  delete b.deletedAt;
+  delete b.deletedTime;
+  state.revenueLog.forEach(e=>{
+    // Bookings deleted before this feature existed had every entry voided in one sweep, so undoing
+    // that same sweep is the exact inverse for them.
+    if(e.bookingId===bookingId && (!b.deleteTracked || e.deletedWithBooking)){
+      e.voided = false;
+      delete e.deletedWithBooking;
+    }
+  });
+  b.deleteTracked = false;
+  let note = '';
+  const room = state.rooms.find(r=>r.id===b.roomId);
+  const wantsRoom = b.deletedRoomStatus || (b.checkOutDate ? '' : 'occupied');
+  if(wantsRoom){
+    if(room && room.status==='available' && !room.bookingId){
+      room.status = wantsRoom;
+      room.bookingId = bookingId;
+    } else if(room){
+      note = `ຫ້ອງ ${b.roomId} ຖືກໃຊ້ໂດຍແຂກອື່ນແລ້ວ — ກູ້ຄືນສະເພາະຂໍ້ມູນ ແລະ ຍອດເງິນ, ຜັງຫ້ອງພັກບໍ່ຖືກແຕະຕ້ອງ`;
+    }
+  }
+  delete b.deletedRoomStatus;
+  saveState();
+  modal=null; render();
+  return note;
+}
+// The one place in this app that really removes data. Everything else only ever appends or flags.
+function doPurgeBooking(bookingId){
+  const b = state.bookings[bookingId];
+  if(!b || !b.voided) return;
+  state.revenueLog = state.revenueLog.filter(e=>e.bookingId!==bookingId);
+  state.rooms.forEach(r=>{ if(r.bookingId===bookingId){ r.bookingId = null; if(r.status!=='available') r.status='available'; } });
+  delete state.bookings[bookingId];
+  saveState();
+  render();
+}
+function doEmptyTrash(){
+  trashedBookings().forEach(b=>{
+    state.revenueLog = state.revenueLog.filter(e=>e.bookingId!==b.id);
+    state.rooms.forEach(r=>{ if(r.bookingId===b.id){ r.bookingId = null; if(r.status!=='available') r.status='available'; } });
+    delete state.bookings[b.id];
+  });
+  saveState();
+  render();
 }
 
 /* ---------------- Rendering ---------------- */
@@ -915,6 +989,7 @@ function render(){
 
 function renderConsole(){
   const tabs = [['grid','ຜັງຫ້ອງພັກ'],['search','ຄົ້ນຫາ / ຈັດການ'],['reports','ການເງິນ']];
+  const trashCount = trashedBookings().length;
   return `
   <div class="console">
     <div class="brand">
@@ -930,9 +1005,10 @@ function renderConsole(){
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
       <div class="clock" id="live-clock">${nowLiveLabel()}</div>
       <div style="font-size:10.5px;color:${firestoreReady?'#8FBF9F':'#D9A441'};">${firestoreReady?'☁ ເຊື່ອມຕໍ່ແລ້ວ':'☁ ກຳລັງເຊື່ອມຕໍ່...'}</div>
-      <div style="display:flex;gap:6px;">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
         <button class="btn btn-ghost btn-sm" id="export-btn" style="border-color:rgba(244,239,227,0.3);color:var(--text-light);">⤓ ສຳຮອງຂໍ້ມູນ</button>
-        <button class="btn btn-ghost btn-sm" id="import-btn" style="border-color:rgba(244,239,227,0.3);color:var(--text-light);">⤴ ກູ້ຄືນ</button>
+        <button class="btn btn-ghost btn-sm" id="import-btn" style="border-color:rgba(244,239,227,0.3);color:var(--text-light);">⤴ ກູ້ຄືນໄຟລ໌</button>
+        <button class="btn btn-ghost btn-sm" id="trash-btn" style="border-color:${view==='trash'?'var(--brass)':'rgba(244,239,227,0.3)'};color:${view==='trash'?'var(--brass)':'var(--text-light)'};">🗑 ຖັງຂີ້ເຫຍື້ອ${trashCount?` (${trashCount})`:''}</button>
         <button class="btn btn-ghost btn-sm" id="logout-btn" style="border-color:rgba(244,239,227,0.3);color:var(--text-light);">ອອກຈາກລະບົບ</button>
       </div>
     </div>
@@ -943,7 +1019,50 @@ function renderView(){
   if(view==='grid') return renderGrid();
   if(view==='search') return renderSearch();
   if(view==='reports') return renderReports();
+  if(view==='trash') return renderTrash();
   return '';
+}
+
+function renderTrash(){
+  const list = trashedBookings();
+  return `
+  <div class="panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <h2 style="margin:0;">🗑 ຖັງຂີ້ເຫຍື້ອ (${list.length})</h2>
+      ${list.length ? `<button class="btn btn-danger btn-sm" id="trash-empty">ລ້າງຖັງຂີ້ເຫຍື້ອທັງໝົດ</button>` : ''}
+    </div>
+    <div class="alert info" style="margin-top:14px;">
+      <span>ℹ️</span>
+      <div>ຂໍ້ມູນທີ່ຖືກລຶບຈະຢູ່ນີ້ ແລະ <b>ບໍ່ສະແດງ</b> ໃນໜ້າຄົ້ນຫາ ຫຼື ໜ້າການເງິນ (ຍອດເງິນຖືກຫັກອອກແລ້ວ).
+      ກົດ “ກູ້ຄືນ” ເພື່ອເອົາກັບມາພ້ອມຍອດເງິນເດີມ — ແຕ່ <b>“ລຶບຖາວອນ” ແລະ “ລ້າງທັງໝົດ” ຈະກູ້ຄືນບໍ່ໄດ້ອີກ</b></div>
+    </div>
+    ${list.length===0 ? '<div class="empty">ຖັງຂີ້ເຫຍື້ອຫວ່າງເປົ່າ</div>' : `
+    <div class="table-scroll">
+    <table>
+      <thead><tr><th>ວັນທີລຶບ</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ເຊັກອິນ</th><th>ເຊັກເອົາທ໌</th><th>ຄືນ</th><th>ຍອດເງິນທີ່ຖືກຫັກ</th><th>ຈັດການ</th></tr></thead>
+      <tbody>
+        ${list.map(b=>{
+          const removed = state.revenueLog
+            .filter(e=>e.bookingId===b.id && e.voided && (!b.deleteTracked || e.deletedWithBooking))
+            .reduce((s,e)=>s+e.amount,0);
+          return `
+          <tr>
+            <td>${b.deletedAt?fmtDate(b.deletedAt):'-'}${b.deletedTime?' · '+b.deletedTime:''}</td>
+            <td>${b.guestName||'-'}</td>
+            <td class="num">${b.roomId}</td>
+            <td>${fmtDate(b.checkInDate)}</td>
+            <td>${b.checkOutDate?fmtDate(b.checkOutDate):'ຍັງບໍ່ໄດ້ເຊັກເອົາທ໌'}</td>
+            <td>${b.shortStay?'ພັກຊົ່ວຄາວ':b.nights}</td>
+            <td>${fmtMoney(removed)}</td>
+            <td class="row-actions">
+              <button class="btn btn-primary btn-sm" data-restore="${b.id}">↩ ກູ້ຄືນ</button>
+              <button class="btn btn-danger btn-sm" data-purge="${b.id}">ລຶບຖາວອນ</button>
+            </td>
+          </tr>`;}).join('')}
+      </tbody>
+    </table>
+    </div>`}
+  </div>`;
 }
 
 function statusMeta(status){
@@ -1061,6 +1180,7 @@ function renderSearch(){
 
 function searchResults(){
   return Object.values(state.bookings).filter(b=>{
+    if(b.voided) return false; // deleted stays live in the trash only -- never in the search results
     const nameOk = !searchQuery.name || (b.guestName||'').toLowerCase().includes(searchQuery.name.toLowerCase());
     const roomOk = !searchQuery.room || b.roomId===searchQuery.room;
     // The date range filters on whichever single date field the dropdown picked (check-in or
@@ -1100,7 +1220,7 @@ function renderSearchResults(results){
           <tr>
             <td>${fmtDate(b.checkInDate)} ${b.checkInTime?('· '+b.checkInTime):''}</td>
             <td>${b.checkOutDate?(fmtDate(b.checkOutDate)+' '+(b.checkOutTime||'')):'ຍັງພັກຢູ່'}</td>
-            <td>${b.guestName||'-'} ${b.voided?'<span class="badge void" style="margin-left:6px;">ຍົກເລີກແລ້ວ</span>':''}</td>
+            <td>${b.guestName||'-'}</td>
             <td class="num">${b.roomId}</td>
             <td>${b.phone||'-'}</td>
             <td>${b.checkOutDate?'ອອກແລ້ວ':'ພັກຢູ່'}</td>
@@ -1112,7 +1232,7 @@ function renderSearchResults(results){
               ${blacklistMatches(b.guestName, b.docNumber).length
                 ? `<span class="badge void" title="ຢູ່ໃນ Blacklist ແລ້ວ">🚫 Blacklist</span>`
                 : `<button class="btn btn-ghost btn-sm" data-blacklist-add="${b.id}">🚫 ເພີ່ມ Blacklist</button>`}
-              ${b.voided?'':`<button class="btn btn-danger btn-sm" data-void="${b.id}">ຍົກເລີກ</button>`}
+              <button class="btn btn-danger btn-sm" data-delete="${b.id}">🗑 ລຶບ</button>
             </td>
           </tr>`;}).join('')}
       </tbody>
@@ -1531,7 +1651,7 @@ function renderEditModal(){
   <div class="modal-overlay" id="overlay">
     <div class="modal">
       <button class="modal-close" id="m-close">✕</button>
-      <h2>ແກ້ໄຂຂໍ້ມູນ — ຫ້ອງ ${b.roomId} ${b.voided?'<span class="badge void" style="margin-left:8px;">ຍົກເລີກແລ້ວ</span>':''}</h2>
+      <h2>ແກ້ໄຂຂໍ້ມູນ — ຫ້ອງ ${b.roomId} ${b.voided?'<span class="badge void" style="margin-left:8px;">ຢູ່ໃນຖັງຂີ້ເຫຍື້ອ</span>':''}</h2>
       <div class="field-grid">
         <div class="field"><label>ວັນທີເຊັກອິນ</label><input type="date" id="ef-checkin" value="${f.checkInDate||''}"></div>
         <div class="field"><label>ວັນທີເຊັກເອົາທ໌ (ຄາດ) ${checkoutLabel}</label><input type="date" id="ef-checkout" value="${f.checkOutDateExp||''}"></div>
@@ -1572,7 +1692,7 @@ function renderEditModal(){
       <p style="font-size:11.5px;color:var(--text-mute);">ຖ້າຈຳນວນຄືນເພີ່ມຂຶ້ນ ລະບົບຈະບັນທຶກຍອດເພີ່ມເປັນ 'ຈ່າຍພາຍຫຼັງ' ໃຫ້ອັດຕະໂນມັດ — ຖ້າຫຼຸດລົງ ຈະ Check-out ໃຫ້ທັນທີ (ຖ້າຫ້ອງຍັງພັກຢູ່) ແລະຍົກເລີກຍອດຄ້າງຈ່າຍຂອງຄືນທີ່ຖືກຕັດອອກໃຫ້ອັດຕະໂນມັດ ຖ້າແກ້ລາຄາ/ຄືນ ຍອດທຸກຄືນທີ່ຍັງບໍ່ຖືກຍົກເລີກຈະຖືກປັບໃຫ້ເປັນລາຄາໃໝ່ນຳ</p>
       <div class="btn-row">
         <button class="btn btn-ghost" id="m-cancel">ປິດ</button>
-        ${b.voided?'':`<button class="btn btn-danger" id="m-void">ຍົກເລີກການເຊັກອິນນີ້</button>`}
+        ${b.voided?'':`<button class="btn btn-danger" id="m-delete">🗑 ລຶບການເຊັກອິນນີ້</button>`}
         <button class="btn btn-primary" id="m-save-edit">ບັນທຶກການແກ້ໄຂ</button>
       </div>
     </div>
@@ -1720,6 +1840,38 @@ function attachHandlers(){
 
   const exportBtn = document.getElementById('export-btn');
   if(exportBtn) exportBtn.onclick = exportBackup;
+  const trashBtn = document.getElementById('trash-btn');
+  if(trashBtn) trashBtn.onclick = ()=>{
+    view = (view==='trash') ? 'grid' : 'trash';
+    modal=null; selectMode=false; selectedRooms=[]; searchError='';
+    render();
+  };
+  document.querySelectorAll('[data-restore]').forEach(el=>{
+    el.onclick = ()=>{
+      const b = state.bookings[el.dataset.restore];
+      if(!b) return;
+      if(!confirm(`ກູ້ຄືນການເຂົ້າພັກຂອງ "${b.guestName||'-'}" ຫ້ອງ ${b.roomId}? ຍອດເງິນຈະກັບຄືນມາໃນການເງິນນຳ`)) return;
+      const note = doRestoreBooking(b.id);
+      if(note) alert(note);
+    };
+  });
+  document.querySelectorAll('[data-purge]').forEach(el=>{
+    el.onclick = ()=>{
+      const b = state.bookings[el.dataset.purge];
+      if(!b) return;
+      if(confirm(`ລຶບຖາວອນ "${b.guestName||'-'}" ຫ້ອງ ${b.roomId}?\n\n⚠️ ຈະກູ້ຄືນບໍ່ໄດ້ອີກຕະຫຼອດໄປ`)){
+        doPurgeBooking(b.id);
+      }
+    };
+  });
+  const trashEmptyBtn = document.getElementById('trash-empty');
+  if(trashEmptyBtn) trashEmptyBtn.onclick = ()=>{
+    const n = trashedBookings().length;
+    if(confirm(`ລ້າງຖັງຂີ້ເຫຍື້ອທັງໝົດ ${n} ລາຍການ?\n\n⚠️ ຈະກູ້ຄືນບໍ່ໄດ້ອີກຕະຫຼອດໄປ`)){
+      doEmptyTrash();
+    }
+  };
+
   const logoutBtn = document.getElementById('logout-btn');
   if(logoutBtn) logoutBtn.onclick = ()=>{ if(confirm('ອອກຈາກລະບົບ?')) signOut(auth); };
   const importBtn = document.getElementById('import-btn');
@@ -1875,10 +2027,10 @@ function attachHandlers(){
   document.querySelectorAll('[data-edit]').forEach(el=>{
     el.onclick = ()=> openEditBookingModal(el.dataset.edit);
   });
-  document.querySelectorAll('[data-void]').forEach(el=>{
+  document.querySelectorAll('[data-delete]').forEach(el=>{
     el.onclick = ()=>{
-      if(confirm('ຍົກເລີກການເຊັກອິນນີ້? ຫ້ອງຈະຖືກເປີດເປັນວ່າງ (ຂໍ້ມູນຈະຍັງຖືກເກັບໄວ້ ບໍ່ຖືກລຶບ)')){
-        doVoidBooking(el.dataset.void);
+      if(confirm('ລຶບການເຊັກອິນນີ້? ຫ້ອງຈະຖືກເປີດເປັນວ່າງ ແລະ ຍອດເງິນຈະຖືກຫັກອອກຈາກການເງິນ\n\n(ຍັງກູ້ຄືນໄດ້ຈາກ 🗑 ຖັງຂີ້ເຫຍື້ອ ດ້ານເທິງ)')){
+        doDeleteBooking(el.dataset.delete);
       }
     };
   });
@@ -2105,10 +2257,10 @@ function attachHandlers(){
       }
       doSaveEdit(modal.bookingId, modal.form);
     };
-    const voidBtn = document.getElementById('m-void');
-    if(voidBtn) voidBtn.onclick = ()=>{
-      if(confirm('ຍົກເລີກການເຊັກອິນນີ້? ຫ້ອງຈະຖືກເປີດເປັນວ່າງ (ຂໍ້ມູນຈະຍັງຖືກເກັບໄວ້ ບໍ່ຖືກລຶບ)')){
-        doVoidBooking(modal.bookingId);
+    const deleteBtn = document.getElementById('m-delete');
+    if(deleteBtn) deleteBtn.onclick = ()=>{
+      if(confirm('ລຶບການເຊັກອິນນີ້? ຫ້ອງຈະຖືກເປີດເປັນວ່າງ ແລະ ຍອດເງິນຈະຖືກຫັກອອກຈາກການເງິນ\n\n(ຍັງກູ້ຄືນໄດ້ຈາກ 🗑 ຖັງຂີ້ເຫຍື້ອ ດ້ານເທິງ)')){
+        doDeleteBooking(modal.bookingId);
       }
     };
   }
