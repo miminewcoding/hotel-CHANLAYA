@@ -173,6 +173,14 @@
   .nat-results .abbr{color:var(--text-mute);font-size:11px;font-weight:700;letter-spacing:.03em;flex-shrink:0;}
   .radio-row{display:flex;gap:16px;padding-top:2px;flex-wrap:wrap;}
   .radio-row label{display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:500;color:var(--text-dark);}
+  /* Amount boxes that appear only once a second payment method is ticked -- a bill split between
+     cash and a transfer needs a figure per method, one method alone never does. */
+  .pay-split{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding:10px 12px;border:1px dashed var(--paper-line);border-radius:8px;}
+  .pay-split-row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .pay-split-row span{font-size:13px;font-weight:500;color:var(--text-dark);}
+  .pay-split-row input{width:170px;padding:6px 8px;border:1px solid var(--paper-line);border-radius:6px;font-family:inherit;font-size:13px;}
+  .pay-split-balance{font-size:12px;color:var(--text-mute);border-top:1px solid var(--paper-line);padding-top:8px;}
+  .pay-warn{color:#B3261E;font-weight:600;}
 
   .total-box{
     background:var(--ink);color:var(--text-light);border-radius:10px;
@@ -273,6 +281,7 @@
       display:grid;grid-template-columns:repeat(4,1fr);
       gap:4px;padding:9px 8px;align-items:end;justify-items:center;
     }
+    .report-sticky-bar .item.grand{grid-column:1/-1;}
     .report-sticky-bar .item .label{font-size:9.5px;text-align:center;line-height:1.2;}
     .report-sticky-bar .item .value{font-size:13px;}
     .report-sticky-bar .item.grand .value{font-size:15px;}
@@ -406,7 +415,7 @@ function autoExtendOverdueRooms(){
   if(new Date().getHours() < 13) return;
   overdueRoomsList().forEach(({room,b})=>{
     b.autoExtendedPending = true; // cleared when staff opens the room -- a prompt to double-check it
-    doAddNights(room.id, b.id, 1, 'later', true);
+    doAddNights(room.id, b.id, 1, [{method:'later', amount:b.pricePerNight}], true);
   });
 }
 
@@ -425,6 +434,9 @@ let blacklistNotice = '';
 let reportMonth = todayStr().slice(0,7);
 let reportRangeFrom = '';
 let reportRangeTo = '';
+// Same shape as the search page's mode dropdown, so ການເງິນ is picked the same way: 'month' keeps
+// the original per-month view, the other three read the ຕັ້ງແຕ່/ຫາ dates.
+let reportDateType = 'month';
 let selectMode = false;
 let selectedRooms = [];
 let showBedSummary = false;
@@ -455,6 +467,9 @@ function migrateState(s){
     if(b.guestName===undefined || b.guestName===null) b.guestName='';
     if(b.autoExtendedPending===undefined) b.autoExtendedPending=false;
     if(b.shortStay===undefined) b.shortStay=false;
+    // Split payments arrived later than these bookings; b.paymentType is still written alongside
+    // payParts, so anything reading the old single field keeps working on new data too.
+    if(!Array.isArray(b.payParts)) b.payParts = [];
   });
   s.revenueLog.forEach(e=>{
     if(e.voided===undefined) e.voided=false;
@@ -474,9 +489,119 @@ function payLabel(pt){
   if(pt==='ldb') return 'ໂອນ LDB';
   if(pt==='wechat') return 'WeChat';
   if(pt==='later') return 'ຈ່າຍພາຍຫຼັງ';
+  if(pt==='split') return 'ຈ່າຍຫຼາຍແບບ';
   return '-';
 }
 const DIGITAL_PAY_TYPES = ['bcel','ldb','wechat'];
+
+/* ---------------- Payment methods (one bill can be split across several) ---------------- */
+// A guest can settle one stay with more than one method at once (part cash, part transfer), so a
+// payment is a LIST of {method, amount} parts rather than a single type. Ticking exactly one box
+// behaves the same as the old radio -- that part simply carries the whole bill and no amount has
+// to be typed -- so the everyday case is unchanged.
+const PAY_METHODS = [
+  {v:'cash',   label:'ຈ່າຍສົດ'},
+  {v:'bcel',   label:'ໂອນ BCEL'},
+  {v:'ldb',    label:'ໂອນ LDB'},
+  {v:'wechat', label:'WeChat'},
+  {v:'later',  label:'ຈ່າຍພາຍຫຼັງ'}
+];
+// store = anything holding {payMethods:[...], payAmounts:{method:'text'}} (a modal form, usually).
+// Returns {parts, error}: parts is what should actually be written to revenueLog, error is a
+// ready-to-show Lao message when the typed figures don't add up.
+function payParts(store, total, opts){
+  const allowPartial = !!(opts && opts.allowPartial);
+  const sel = (store.payMethods||[]).filter(m=>PAY_METHODS.some(x=>x.v===m));
+  if(sel.length===0) return {parts:[], error:'ກະລຸນາເລືອກຮູບແບບການຊຳລະ'};
+  if(sel.length===1) return {parts:[{method:sel[0], amount:total}], error:''};
+  const amounts = store.payAmounts||{};
+  const rows = sel.map(m=>({method:m, amount:Math.max(0, parseInt(amounts[m],10)||0)}));
+  const typed = rows.reduce((s,r)=>s+r.amount,0);
+  const blanks = rows.filter(r=>r.amount<=0);
+  // Exactly one box left empty means "and the rest goes on this one" -- the way staff will use this
+  // most often (200,000 cash, remainder transferred) without doing the subtraction themselves.
+  let auto = '', autoAmount = 0;
+  if(blanks.length===1 && typed<total){ autoAmount = total-typed; blanks[0].amount = autoAmount; auto = blanks[0].method; }
+  const sum = rows.reduce((s,r)=>s+r.amount,0);
+  if(sum>total) return {parts:[], error:`ຍອດທີ່ໃສ່ ${fmtMoney(sum)} ເກີນຍອດທີ່ຕ້ອງຈ່າຍ ${fmtMoney(total)}`};
+  if(sum<total && !allowPartial) return {parts:[], error:`ຍອດຍັງບໍ່ຄົບ — ຍັງເຫຼືອ ${fmtMoney(total-sum)}`};
+  const parts = rows.filter(r=>r.amount>0);
+  if(!parts.length) return {parts:[], error:'ກະລຸນາໃສ່ຈຳນວນເງິນ'};
+  return {parts, error:'', auto, autoAmount};
+}
+function paySignature(parts){ return (parts||[]).map(p=>p.method+':'+p.amount).join('|'); }
+function partsLabel(parts){
+  if(!parts || !parts.length) return '-';
+  if(parts.length===1) return payLabel(parts[0].method);
+  return parts.map(p=>`${payLabel(p.method)} ${fmtMoney(p.amount)}`).join(' + ');
+}
+// Bookings saved before split payments existed have no payParts -- fall back to the single type
+// they do have, so old stays still print a payment on the bill and in the edit form.
+function bookingPayParts(b){
+  return (b && Array.isArray(b.payParts) && b.payParts.length) ? b.payParts : [{method:(b||{}).paymentType, amount:(b||{}).totalPrice||0}];
+}
+function bookingPayLabel(b){ return partsLabel(bookingPayParts(b)); }
+function payStoreFromParts(parts){
+  const store = {payMethods: parts.map(p=>p.method), payAmounts:{}};
+  if(parts.length>1) parts.forEach(p=>{ store.payAmounts[p.method] = String(p.amount); });
+  return store;
+}
+
+// The tick-boxes plus (only when more than one is ticked) an amount per method and a running
+// balance. Shared by check-in, group check-in, ຢູ່ຕໍ່, ຊຳລະຄ້າງ and ແກ້ໄຂ -- `prefix` keeps the
+// element ids apart when two pickers sit in the same modal.
+function renderPayPicker(prefix, store, total, opts){
+  const o = opts||{};
+  const sel = store.payMethods||[];
+  const methods = o.methods ? PAY_METHODS.filter(m=>o.methods.includes(m.v)) : PAY_METHODS;
+  const boxes = methods.map(m=>{
+    const label = (m.v==='later' && o.longLater) ? 'ຈ່າຍພາຍຫຼັງ (ບໍລິສັດ/ອົງກອນ)' : m.label;
+    return `<label><input type="checkbox" id="${prefix}-pay-${m.v}" ${sel.includes(m.v)?'checked':''}> ${label}</label>`;
+  }).join('');
+  const split = sel.length>1 ? `
+          <div class="pay-split">
+            ${sel.map(v=>`<div class="pay-split-row"><span>${payLabel(v)}</span><input type="number" min="0" id="${prefix}-payamt-${v}" value="${(store.payAmounts||{})[v]||''}" placeholder="ວ່າງໄວ້ = ສ່ວນທີ່ເຫຼືອ"></div>`).join('')}
+            <div class="pay-split-balance" id="${prefix}-pay-balance">${payBalanceHtml(store, total, o)}</div>
+          </div>` : '';
+  return `<div class="field full">
+          <label>${o.label||'ຮູບແບບການຊຳລະເງິນ'} <span style="font-weight:400;color:var(--text-mute);">(ຕິກໄດ້ຫຼາຍກວ່າ 1 ຖ້າຈ່າຍປະສົມ)</span></label>
+          <div class="radio-row">${boxes}</div>${split}
+        </div>`;
+}
+function payBalanceHtml(store, total, opts){
+  const r = payParts(store, total, opts);
+  if(r.error) return `<span class="pay-warn">⚠️ ${r.error}</span>`;
+  const sum = r.parts.reduce((s,p)=>s+p.amount,0);
+  const left = total - sum;
+  // Spelling out which box absorbed the remainder, so leaving one empty never looks like the figure
+  // was simply ignored.
+  const filled = r.auto
+    ? ` · <b>${payLabel(r.auto)}</b> ຮັບສ່ວນທີ່ເຫຼືອ <b>${fmtMoney(r.autoAmount)}</b>`
+    : ` · ໃສ່ແລ້ວ <b>${fmtMoney(sum)}</b>`;
+  return `ຍອດທີ່ຕ້ອງຈ່າຍ <b>${fmtMoney(total)}</b>${filled}${left>0?` · ຍັງເຫຼືອ <b>${fmtMoney(left)}</b>`:''}`;
+}
+// `total` may be a function: the bill still moves while the modal is open (nights, price, extra
+// nights), and the balance line has to follow it without a full re-render.
+function wirePayPicker(prefix, store, total, opts, onToggle){
+  const totalNow = ()=> (typeof total==='function' ? total() : total);
+  PAY_METHODS.forEach(m=>{
+    const cb = document.getElementById(`${prefix}-pay-${m.v}`);
+    if(cb) cb.onchange = ()=>{
+      const on = new Set(store.payMethods||[]);
+      if(cb.checked){ on.add(m.v); }
+      else { on.delete(m.v); if(store.payAmounts) delete store.payAmounts[m.v]; }
+      store.payMethods = PAY_METHODS.filter(x=>on.has(x.v)).map(x=>x.v);
+      onToggle(); // the amount boxes appear/disappear, so this one does need a re-render
+    };
+    const amt = document.getElementById(`${prefix}-payamt-${m.v}`);
+    if(amt) amt.oninput = ()=>{
+      if(!store.payAmounts) store.payAmounts = {};
+      store.payAmounts[m.v] = amt.value;
+      const el = document.getElementById(`${prefix}-pay-balance`);
+      if(el) el.innerHTML = payBalanceHtml(store, totalNow(), opts);
+    };
+  });
+}
 
 /* ---------------- Blacklist ---------------- */
 // Blacklist rows are free text typed by staff (a reason can contain anything), so unlike the
@@ -680,11 +805,87 @@ async function sendReportToExcel(){
 // Splits a multi-night charge into one revenueLog entry per night, dated the night it actually
 // covers -- so the daily figures on ການເງິນ show this room's revenue on every date of the stay, not
 // lumped onto whichever day it happened to be logged.
-function pushNightlyRevenue(bookingId, roomId, guestName, startDate, nights, pricePerNight, time, paymentType, kind){
-  for(let i=0;i<nights;i++){
-    state.revenueLog.push({id:uid(), bookingId, date:addDays(startDate,i), time, roomId, guestName, amount:pricePerNight,
-      paymentType, kind, voided:false});
+function payQueue(parts){ return parts.map(p=>({method:p.method, left:p.amount})); }
+// Takes the next slice of `amount` out of the queue, oldest part first. Whatever the queue cannot
+// cover comes back as 'later' -- that is what makes a partial payment simply reduce what is owed.
+function allocateFromQueue(queue, amount){
+  const alloc = [];
+  let left = amount;
+  while(left>0){
+    const part = queue.find(p=>p.left>0);
+    if(!part){ alloc.push({method:'later', amount:left}); break; }
+    const take = Math.min(left, part.left);
+    alloc.push({method:part.method, amount:take});
+    part.left -= take; left -= take;
   }
+  return alloc;
+}
+// Rewrites one nightly row into its allocation: the row itself becomes the first slice (keeping its
+// id, so a row already on the Excel sheet is not duplicated) and further slices are appended as new
+// rows on the same night.
+function applyAllocationToEntry(e, alloc){
+  if(!alloc.length) return;
+  e.amount = alloc[0].amount;
+  e.paymentType = alloc[0].method;
+  alloc.slice(1).forEach(a=>{
+    state.revenueLog.push({id:uid(), bookingId:e.bookingId, date:e.date, time:e.time, roomId:e.roomId,
+      guestName:e.guestName, amount:a.amount, paymentType:a.method, kind:e.kind, voided:false, exportedToSheet:false});
+  });
+}
+// One revenueLog row per night per method: the per-night dating the reports depend on is kept, and
+// a split bill just means one night can carry two rows (e.g. 150,000 cash + 100,000 BCEL). Returns
+// what this stay actually drew from the queue, so a booking in a group check-in can store its own
+// share of one payment that covered several rooms.
+function pushNightlyRevenueParts(queue, bookingId, roomId, guestName, startDate, nights, pricePerNight, time, kind){
+  const used = {};
+  for(let i=0;i<nights;i++){
+    const date = addDays(startDate,i);
+    // A free night still gets a row, so the night is visible on the sheet and in ການເງິນ.
+    const alloc = pricePerNight>0 ? allocateFromQueue(queue, pricePerNight)
+                                  : [{method:(queue.find(p=>p.left>0)||{}).method||'later', amount:0}];
+    alloc.forEach(a=>{
+      state.revenueLog.push({id:uid(), bookingId, date, time, roomId, guestName, amount:a.amount,
+        paymentType:a.method, kind, voided:false});
+      used[a.method] = (used[a.method]||0) + a.amount;
+    });
+  }
+  return PAY_METHODS.filter(m=>used[m.v]>0).map(m=>({method:m.v, amount:used[m.v]}));
+}
+function pushNightlyRevenue(bookingId, roomId, guestName, startDate, nights, pricePerNight, time, paymentType, kind){
+  return pushNightlyRevenueParts(payQueue([{method:paymentType, amount:nights*pricePerNight}]),
+    bookingId, roomId, guestName, startDate, nights, pricePerNight, time, kind);
+}
+// Re-applies a payment split across a booking's live nightly rows -- used when staff correct the
+// payment on ແກ້ໄຂ. Rows keep their dates, so the daily figures never move; only who paid changes.
+function restampBookingPayments(bookingId, parts){
+  const entries = state.revenueLog
+    .filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights'))
+    .sort((a,b)=> (a.date+' '+(a.time||'')).localeCompare(b.date+' '+(b.time||'')));
+  const queue = payQueue(parts);
+  entries.forEach(e=>{ applyAllocationToEntry(e, allocateFromQueue(queue, e.amount)); });
+}
+// A price correction has to keep each night's rows adding up to the new price. With a split payment
+// one night can be several rows, so the new price is shared out in the same proportions instead of
+// being stamped onto every row (which would multiply that night's takings by the number of methods).
+function repriceNightlyEntries(bookingId, newPrice){
+  const byDate = {};
+  state.revenueLog.forEach(e=>{
+    if(e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights')){
+      (byDate[e.date] = byDate[e.date] || []).push(e);
+    }
+  });
+  Object.keys(byDate).forEach(d=>{
+    const rows = byDate[d];
+    if(rows.length===1){ rows[0].amount = newPrice; return; }
+    const old = rows.reduce((s,e)=>s+e.amount,0);
+    let left = newPrice;
+    rows.forEach((e,i)=>{
+      const share = (i===rows.length-1) ? left
+        : (old>0 ? Math.round(newPrice*e.amount/old) : Math.round(newPrice/rows.length));
+      e.amount = Math.max(0, Math.min(share, left));
+      left -= e.amount;
+    });
+  });
 }
 
 function doGroupCheckin(roomIds, form){
@@ -692,24 +893,38 @@ function doGroupCheckin(roomIds, form){
   const time = nowTimeStr();
   const groupId = uid();
   const nights = Math.max(1, parseInt(form.nights,10)||1);
+  const priceFor = roomId=>{
+    const room = state.rooms.find(r=>r.id===roomId);
+    return Math.max(0, parseInt((form.prices&&form.prices[roomId])||room.price,10));
+  };
+  // The payment is taken against the whole group's bill, then drained room by room -- one guest
+  // paying 1,000,000 cash + 500,000 BCEL for four rooms should not have to split it per room.
+  const grandTotal = roomIds.reduce((s,id)=>s+nights*priceFor(id),0);
+  const pay = payParts(form, grandTotal);
+  if(pay.error){ alert(pay.error); return false; }
+  const queue = payQueue(pay.parts);
+  const usesWechat = pay.parts.some(p=>p.method==='wechat');
   roomIds.forEach(roomId=>{
     const room = state.rooms.find(r=>r.id===roomId);
-    const price = Math.max(0, parseInt((form.prices&&form.prices[roomId])||room.price,10));
+    const price = priceFor(roomId);
     const total = nights * price;
     const bookingId = uid();
     state.bookings[bookingId] = {
       id:bookingId, roomId, staffName:form.receiverName||'', guestName:form.guestName||'',
       gender:form.gender||'', docNumber:form.docNumber||'', nationality:form.nationality||'', phone:form.phone||'',
-      nights, pricePerNight:price, totalPrice:total, paymentType:form.paymentType||'later',
-      wechatAmount: form.paymentType==='wechat' ? (form.wechatAmount||'') : '',
+      nights, pricePerNight:price, totalPrice:total, paymentType:'later', payParts:[],
+      wechatAmount: usesWechat ? (form.wechatAmount||'') : '',
       checkInDate: ciDate, checkInTime: time, checkOutDate: null, checkOutTime:'', voided:false, groupId,
       autoExtendedPending:false
     };
     room.status = 'occupied';
     room.bookingId = bookingId;
-    pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, time, form.paymentType||'later', 'checkin');
+    const used = pushNightlyRevenueParts(queue, bookingId, roomId, form.guestName||'', ciDate, nights, price, time, 'checkin');
+    state.bookings[bookingId].payParts = used;
+    state.bookings[bookingId].paymentType = used.length===1 ? used[0].method : 'split';
   });
   saveState();
+  return true;
 }
 
 function doCheckin(roomId, form){
@@ -717,30 +932,34 @@ function doCheckin(roomId, form){
   const nights = Math.max(1, parseInt(form.nights,10)||1);
   const price = Math.max(0, parseInt(form.price,10) || room.price);
   const total = nights * price;
+  const pay = payParts(form, total);
+  if(pay.error){ alert(pay.error); return; }
   const bookingId = uid();
   const ciDate = form.ciDate || todayStr();
+  const time = nowTimeStr();
   state.bookings[bookingId] = {
     id:bookingId, roomId, staffName:form.receiverName||'', guestName:form.guestName||'',
     gender:form.gender||'', docNumber:form.docNumber||'', nationality:form.nationality||'', phone:form.phone||'',
-    nights, pricePerNight:price, totalPrice:total, paymentType:form.paymentType||'later',
-    wechatAmount: form.paymentType==='wechat' ? (form.wechatAmount||'') : '',
-    checkInDate: ciDate, checkInTime: nowTimeStr(), checkOutDate: null, checkOutTime:'', voided:false,
+    nights, pricePerNight:price, totalPrice:total,
+    paymentType: pay.parts.length===1 ? pay.parts[0].method : 'split', payParts: pay.parts,
+    wechatAmount: pay.parts.some(p=>p.method==='wechat') ? (form.wechatAmount||'') : '',
+    checkInDate: ciDate, checkInTime: time, checkOutDate: null, checkOutTime:'', voided:false,
     autoExtendedPending:false
   };
   room.status = 'occupied';
   room.bookingId = bookingId;
-  pushNightlyRevenue(bookingId, roomId, form.guestName||'', ciDate, nights, price, nowTimeStr(), form.paymentType||'later', 'checkin');
+  pushNightlyRevenueParts(payQueue(pay.parts), bookingId, roomId, form.guestName||'', ciDate, nights, price, time, 'checkin');
   saveState();
   modal=null; render();
 }
 
-function doAddNights(roomId, bookingId, extraNights, paymentType, keepModal){
+function doAddNights(roomId, bookingId, extraNights, parts, keepModal){
   const b = state.bookings[bookingId];
   const n = Math.max(1, parseInt(extraNights,10)||1);
   const currentDue = addDays(b.checkInDate, b.nights); // capture before nights is mutated below
   b.nights += n;
   b.totalPrice += n * b.pricePerNight;
-  pushNightlyRevenue(bookingId, roomId, b.guestName, currentDue, n, b.pricePerNight, nowTimeStr(), paymentType, 'addnights');
+  pushNightlyRevenueParts(payQueue(parts), bookingId, roomId, b.guestName, currentDue, n, b.pricePerNight, nowTimeStr(), 'addnights');
   saveState();
   if(!keepModal) modal=null;
   render();
@@ -749,16 +968,18 @@ function doAddNights(roomId, bookingId, extraNights, paymentType, keepModal){
 // Flips each outstanding 'later' entry to the real method actually paid, oldest night first, instead
 // of logging one lump sum on whatever day the settlement happens -- so a guest who stayed 3 nights
 // and settles today still shows as 250,000 on each of those 3 days in the report, not 750,000 today.
-function doSettlePayment(roomId, bookingId, method){
-  let remaining = bookingUnpaid(bookingId);
-  if(remaining<=0) return;
+function doSettlePayment(roomId, bookingId, parts){
+  if(bookingUnpaid(bookingId)<=0) return;
   const owedEntries = state.revenueLog
     .filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights') && entryPaymentType(e)==='later')
     .sort((a,b)=> (a.date+' '+(a.time||'')).localeCompare(b.date+' '+(b.time||'')));
+  // The money can arrive as a mix (part cash, part transfer) and can be less than the full debt, so
+  // each night is filled from the payment in turn -- a night the payment only half covers is split
+  // into a paid row and a row that stays 'later', which keeps ຍອດຄ້າງ exactly right.
+  const queue = payQueue(parts);
   owedEntries.forEach(e=>{
-    if(remaining<=0) return;
-    e.paymentType = method;
-    remaining -= e.amount;
+    if(!queue.some(p=>p.left>0)) return;
+    applyAllocationToEntry(e, allocateFromQueue(queue, e.amount));
   });
   saveState();
   render();
@@ -796,7 +1017,6 @@ function doConfirmCleaning(roomId){
 
 function doSaveEdit(bookingId, fields){
   const b = state.bookings[bookingId];
-  const oldPaymentType = b.paymentType;
   // A nights/date correction (from the edit-booking form) must recompute the total and log the
   // difference, because bookingUnpaid() reads only revenueLog, never b.totalPrice -- silently
   // changing nights without this would leave "unpaid" showing the old, wrong figure forever.
@@ -846,30 +1066,30 @@ function doSaveEdit(bookingId, fields){
   // A price-per-night correction re-stamps every still-live nightly row for this booking, same
   // idea as the payment-type flip below -- b.totalPrice is never the source of truth on its own.
   if(priceChanged){
-    state.revenueLog.forEach(e=>{
-      if(e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights')){
-        e.amount = newPrice;
-      }
-    });
+    repriceNightlyEntries(bookingId, newPrice);
   }
   fields.pricePerNight = newPrice;
   fields.totalPrice = billNights * newPrice;
+  // Only re-stamp when the payment picker was actually changed: an edit to the guest's name must
+  // never rewrite money rows, and a nights change alone still logs its extra nights as 'later'.
+  const newParts = Array.isArray(fields.payParts) && fields.payParts.length ? fields.payParts : null;
+  const payChanged = !!newParts && paySignature(newParts) !== (fields.origPaySig||'');
+  delete fields.origPaySig; delete fields.payMethods; delete fields.payAmounts;
   Object.assign(b, fields);
-  if(fields.paymentType && fields.paymentType !== oldPaymentType){
-    state.revenueLog.forEach(e=>{
-      if(e.bookingId===bookingId && !e.voided && (e.kind==='checkin'||e.kind==='addnights')){
-        e.paymentType = fields.paymentType;
-      }
-    });
-  }
+  if(payChanged) restampBookingPayments(bookingId, newParts);
   saveState();
   modal=null; render();
 }
 
 function openEditBookingModal(bookingId){
   const b = state.bookings[bookingId];
+  const parts = bookingPayParts(b);
+  const payStore = payStoreFromParts(parts);
+  // origPaySig rides along in the form so doSaveEdit can tell "staff changed the payment" apart
+  // from "staff changed something else and the payment simply came back unchanged".
   modal = {type:'editBooking', bookingId:b.id, form:{guestName:b.guestName, gender:b.gender,
-    docNumber:b.docNumber, nationality:b.nationality, phone:b.phone, paymentType:b.paymentType, wechatAmount:b.wechatAmount||'',
+    docNumber:b.docNumber, nationality:b.nationality, phone:b.phone, wechatAmount:b.wechatAmount||'',
+    payMethods:payStore.payMethods, payAmounts:payStore.payAmounts, origPaySig:paySignature(parts),
     pricePerNight:b.pricePerNight, checkInDate:b.checkInDate, checkOutDateExp:addDays(b.checkInDate,b.nights)}};
   render();
 }
@@ -1309,34 +1529,49 @@ function bookingsForReportRange(fromDate, toDate){
     })
     .sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
 }
+// The ການເງິນ page picks its dates exactly the way ຄົ້ນຫາ / ຈັດການ does, and each mode means the
+// same thing on both pages: 'checkin'/'checkout' filter on that one date, 'between' is the overlap
+// search (who was staying at any point in the window).
+function bookingsForReportDate(type, fromDate, toDate){
+  if(type==='between') return bookingsForReportRange(fromDate, toDate);
+  return Object.values(state.bookings)
+    .filter(b=>{
+      if(b.voided || !b.checkInDate) return false;
+      const target = type==='checkout' ? b.checkOutDate : b.checkInDate;
+      return !!target && (!fromDate || target>=fromDate) && (!toDate || target<=toDate);
+    })
+    .sort((a,b)=> b.checkInDate.localeCompare(a.checkInDate) || (b.checkInTime||'').localeCompare(a.checkInTime||'') || Number(a.roomId)-Number(b.roomId));
+}
+const REPORT_MODE_LABEL = {month:'ລາຍເດືອນ', checkin:'ວັນທີເຊັກອິນ', checkout:'ວັນທີເຊັກເອົາທ໌', between:'ລະຫວ່າງ'};
 // Only money actually received (settlements plus anything not still 'later'), the same rule the
 // rest of the app uses -- b.totalPrice alone would count still-unpaid amounts as if collected.
 function bookingReceived(bookingId){
   const entries = state.revenueLog.filter(e=>e.bookingId===bookingId && !e.voided && (e.kind==='settle' || entryPaymentType(e)!=='later'));
   const total = entries.reduce((s,e)=>s+e.amount,0);
   const byMethod = m => entries.filter(e=>entryPaymentType(e)===m).reduce((s,e)=>s+e.amount,0);
-  return { total, bcel:byMethod('bcel'), ldb:byMethod('ldb'), wechat:byMethod('wechat') };
+  return { total, cash:byMethod('cash'), bcel:byMethod('bcel'), ldb:byMethod('ldb'), wechat:byMethod('wechat') };
 }
 
 function renderReports(){
-  const rangeActive = !!(reportRangeFrom || reportRangeTo);
-  const bookings = rangeActive ? bookingsForReportRange(reportRangeFrom, reportRangeTo) : bookingsForReportMonth(reportMonth);
+  const mode = reportDateType || 'month';
+  const bookings = mode==='month' ? bookingsForReportMonth(reportMonth)
+                                  : bookingsForReportDate(mode, reportRangeFrom, reportRangeTo);
   const rows = bookings.map(b=>({ b, money: bookingReceived(b.id) }));
   const grand = rows.reduce((s,r)=>s+r.money.total,0);
+  const cashSum = rows.reduce((s,r)=>s+r.money.cash,0);
   const bcelSum = rows.reduce((s,r)=>s+r.money.bcel,0);
   const ldbSum = rows.reduce((s,r)=>s+r.money.ldb,0);
   const wechatSum = rows.reduce((s,r)=>s+r.money.wechat,0);
   const syncCount = entriesToSync().length;
-  const grandLabel = rangeActive
-    ? `ຍອດຮັບທັງໝົດຊ່ວງວັນທີ ${reportRangeFrom?fmtDate(reportRangeFrom):'…'} — ${reportRangeTo?fmtDate(reportRangeTo):'…'}`
-    : 'ຍອດຮັບທັງໝົດເດືອນນີ້';
+  const grandLabel = mode==='month'
+    ? 'ຍອດຮັບທັງໝົດເດືອນນີ້'
+    : `ຍອດຮັບທັງໝົດ ${REPORT_MODE_LABEL[mode]} ${reportRangeFrom?fmtDate(reportRangeFrom):'…'} — ${reportRangeTo?fmtDate(reportRangeTo):'…'}`;
 
   return `
   <div class="panel" style="margin-bottom:100px;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px;">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <h2 style="margin:0;">ການເງິນ — ລາຍຮັບ</h2>
-        <input type="month" id="r-month" value="${reportMonth}">
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         ${reportStatusMsg ? `<span style="font-size:12px;color:var(--text-mute);">${reportStatusMsg}</span>` : ''}
@@ -1344,15 +1579,25 @@ function renderReports(){
       </div>
     </div>
     <div class="field-grid" style="margin-bottom:10px;">
-      <div class="field"><label>ຫຼືຄົ້ນຫາຊ່ວງວັນທີ ຕັ້ງແຕ່ວັນທີ</label><input type="date" id="r-range-from" value="${reportRangeFrom}"></div>
+      <div class="field"><label>ໂໝດການເລືອກວັນທີ</label>
+        <select id="r-date-type">
+          <option value="month" ${mode==='month'?'selected':''}>ລາຍເດືອນ</option>
+          <option value="checkin" ${mode==='checkin'?'selected':''}>ວັນທີເຊັກອິນ</option>
+          <option value="checkout" ${mode==='checkout'?'selected':''}>ວັນທີເຊັກເອົາທ໌</option>
+          <option value="between" ${mode==='between'?'selected':''}>ລະຫວ່າງ</option>
+        </select>
+      </div>
+      ${mode==='month' ? `
+      <div class="field"><label>ເດືອນ</label><input type="month" id="r-month" value="${reportMonth}"></div>` : `
+      <div class="field"><label>ຊ່ວງວັນທີ ຕັ້ງແຕ່</label><input type="date" id="r-range-from" value="${reportRangeFrom}"></div>
       <div class="field"><label>ຫາວັນທີ</label><input type="date" id="r-range-to" value="${reportRangeTo}"></div>
-      <div class="field" style="justify-content:flex-end;"><button class="btn btn-ghost btn-sm" id="r-range-clear">ລ້າງການຄົ້ນຫາຊ່ວງວັນທີ</button></div>
+      <div class="field" style="justify-content:flex-end;"><button class="btn btn-ghost btn-sm" id="r-range-clear">ລ້າງຊ່ວງວັນທີ</button></div>`}
     </div>
-    <p style="font-size:11.5px;color:var(--text-mute);margin-top:0;margin-bottom:16px;">ລາຍລະອຽດລາຍຮັບ ລາຍເດືອນ(ປ່ຽນເດືອນຢູ່ຂ້າງເທິງ)</p>
+    <p style="font-size:11.5px;color:var(--text-mute);margin-top:0;margin-bottom:16px;">ເລືອກໂໝດວັນທີແບບດຽວກັບໜ້າ ຄົ້ນຫາ / ຈັດການ — ລາຍເດືອນ ຫຼື ລະບຸຊ່ວງວັນທີເອງ</p>
     ${rows.length===0 ? '<div class="empty">ບໍ່ມີລາຍການໃນຊ່ວງນີ້</div>' : `
     <div class="table-scroll">
     <table>
-      <thead><tr><th>ເຊັກອິນ</th><th>ເຊັກເອົາທ໌</th><th>ຄືນ</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ຈ່າຍທັງໝົດ</th><th>BCEL</th><th>LDB</th><th>WeChat</th></tr></thead>
+      <thead><tr><th>ເຊັກອິນ</th><th>ເຊັກເອົາທ໌</th><th>ຄືນ</th><th>ຊື່ລູກຄ້າ</th><th>ຫ້ອງ</th><th>ຈ່າຍທັງໝົດ</th><th>ເງິນສົດ</th><th>BCEL</th><th>LDB</th><th>WeChat</th></tr></thead>
       <tbody>
         ${rows.map(({b,money})=>`
           <tr>
@@ -1362,6 +1607,7 @@ function renderReports(){
             <td>${b.guestName||'-'}</td>
             <td class="num">${b.roomId}</td>
             <td>${fmtMoney(money.total)}</td>
+            <td>${money.cash?fmtMoney(money.cash):'-'}</td>
             <td>${money.bcel?fmtMoney(money.bcel):'-'}</td>
             <td>${money.ldb?fmtMoney(money.ldb):'-'}</td>
             <td>${money.wechat?fmtMoney(money.wechat):'-'}</td>
@@ -1372,6 +1618,7 @@ function renderReports(){
   </div>
   <div class="report-sticky-bar">
     <div class="item grand"><div class="label"><span class="bar-label-full">${grandLabel}</span><span class="bar-label-short">ລວມທັງໝົດ</span></div><div class="value num">${fmtMoney(grand)}</div></div>
+    <div class="item"><div class="label">ເງິນສົດ</div><div class="value num">${fmtMoney(cashSum)}</div></div>
     <div class="item"><div class="label">BCEL</div><div class="value num">${fmtMoney(bcelSum)}</div></div>
     <div class="item"><div class="label">LDB</div><div class="value num">${fmtMoney(ldbSum)}</div></div>
     <div class="item"><div class="label">WeChat</div><div class="value num">${fmtMoney(wechatSum)}</div></div>
@@ -1396,7 +1643,7 @@ function renderCheckinModal(){
   const price = Math.max(0, parseInt(f.price,10) || 0);
   const total = nights * price;
   const otherVisible = f.receiverSel==='__other';
-  const wechatVisible = f.paymentType==='wechat';
+  const wechatVisible = (f.payMethods||[]).includes('wechat');
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1442,16 +1689,7 @@ function renderCheckinModal(){
           <input type="number" min="1" id="f-nights" value="${f.nights||1}"></div>
         <div class="field"><label>ລາຄາ/ຄືນ (ແກ້ໄຂໄດ້)</label>
           <input type="number" min="0" id="f-price" value="${price}"></div>
-        <div class="field full">
-          <label>ຮູບແບບການຊຳລະເງິນ</label>
-          <div class="radio-row">
-            <label><input type="radio" name="pay" value="cash" id="f-pay-cash" ${f.paymentType==='cash'?'checked':''}> ຈ່າຍສົດ</label>
-            <label><input type="radio" name="pay" value="bcel" id="f-pay-bcel" ${f.paymentType==='bcel'?'checked':''}> ໂອນ BCEL</label>
-            <label><input type="radio" name="pay" value="ldb" id="f-pay-ldb" ${f.paymentType==='ldb'?'checked':''}> ໂອນ LDB</label>
-            <label><input type="radio" name="pay" value="wechat" id="f-pay-wechat" ${f.paymentType==='wechat'?'checked':''}> WeChat</label>
-            <label><input type="radio" name="pay" value="later" id="f-pay-later" ${f.paymentType==='later'?'checked':''}> ຈ່າຍພາຍຫຼັງ (ບໍລິສັດ/ອົງກອນ)</label>
-          </div>
-        </div>
+        ${renderPayPicker('f', f, total, {longLater:true})}
         <div class="field full" id="f-wechat-wrap" style="display:${wechatVisible?'flex':'none'};">
           <label>ຈຳນວນເງິນ ຢວນ</label>
           <input type="number" min="0" id="f-wechat-amount" value="${f.wechatAmount||''}" placeholder="ຕົວຢ່າງ: 65">
@@ -1477,7 +1715,7 @@ function renderGroupCheckinModal(){
   const nights = Math.max(1, parseInt(f.nights,10)||1);
   const total = rooms.reduce((s,r)=>s+nights*(parseInt(f.prices[r.id],10)||0),0);
   const otherVisible = f.receiverSel==='__other';
-  const wechatVisible = f.paymentType==='wechat';
+  const wechatVisible = (f.payMethods||[]).includes('wechat');
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1521,16 +1759,7 @@ function renderGroupCheckinModal(){
           <input type="date" id="f-codate" value="${f.coDate}"></div>
         <div class="field"><label>ຈຳນວນຄືນ (ໃຊ້ຮ່ວມກັນທຸກຫ້ອງ)</label>
           <input type="number" min="1" id="f-nights" value="${f.nights||1}"></div>
-        <div class="field full">
-          <label>ຮູບແບບການຊຳລະເງິນ</label>
-          <div class="radio-row">
-            <label><input type="radio" name="pay" value="cash" id="f-pay-cash" ${f.paymentType==='cash'?'checked':''}> ຈ່າຍສົດ</label>
-            <label><input type="radio" name="pay" value="bcel" id="f-pay-bcel" ${f.paymentType==='bcel'?'checked':''}> ໂອນ BCEL</label>
-            <label><input type="radio" name="pay" value="ldb" id="f-pay-ldb" ${f.paymentType==='ldb'?'checked':''}> ໂອນ LDB</label>
-            <label><input type="radio" name="pay" value="wechat" id="f-pay-wechat" ${f.paymentType==='wechat'?'checked':''}> WeChat</label>
-            <label><input type="radio" name="pay" value="later" id="f-pay-later" ${f.paymentType==='later'?'checked':''}> ຈ່າຍພາຍຫຼັງ (ບໍລິສັດ/ອົງກອນ)</label>
-          </div>
-        </div>
+        ${renderPayPicker('f', f, total, {longLater:true})}
         <div class="field full" id="f-wechat-wrap" style="display:${wechatVisible?'flex':'none'};">
           <label>ຈຳນວນເງິນ ຢວນ</label>
           <input type="number" min="0" id="f-wechat-amount" value="${f.wechatAmount||''}" placeholder="ຕົວຢ່າງ: 65">
@@ -1559,7 +1788,9 @@ function renderOccupiedModal(){
   if(!modal.targetCheckout) modal.targetCheckout = addDays(currentDue, 1);
   const extraNights = daysBetween(currentDue, modal.targetCheckout);
   const unpaid = bookingUnpaid(b.id);
-  if(!modal.settleMethod) modal.settleMethod = 'cash';
+  const extraTotal = Math.max(0, extraNights) * b.pricePerNight;
+  if(!modal.extraPayStore) modal.extraPayStore = {payMethods:['later'], payAmounts:{}};
+  if(!modal.settleStore) modal.settleStore = {payMethods:['cash'], payAmounts:{}};
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1585,30 +1816,16 @@ function renderOccupiedModal(){
         <h2 style="font-size:15px;">ຢູ່ຕໍ່</h2>
         <div class="field-grid">
           <div class="field"><label>ວັນທີ Check-out ໃໝ່ ${extraNights>0?`(= ${extraNights} ຄືນເພີ່ມ)`:'(ຕ້ອງຫຼັງວັນຄາດປັດຈຸບັນ)'}</label><input type="date" id="f-extra" value="${modal.targetCheckout}"></div>
-          <div class="field">
-            <label>ການຊຳລະເງິນສ່ວນເພີ່ມ</label>
-            <div class="radio-row">
-              <label><input type="radio" name="paye" value="cash" id="e-pay-cash" ${modal.extraPay==='cash'?'checked':''}> ຈ່າຍສົດ</label>
-              <label><input type="radio" name="paye" value="bcel" id="e-pay-bcel" ${modal.extraPay==='bcel'?'checked':''}> BCEL</label>
-              <label><input type="radio" name="paye" value="ldb" id="e-pay-ldb" ${modal.extraPay==='ldb'?'checked':''}> LDB</label>
-              <label><input type="radio" name="paye" value="wechat" id="e-pay-wechat" ${modal.extraPay==='wechat'?'checked':''}> WeChat</label>
-              <label><input type="radio" name="paye" value="later" id="e-pay-later" ${modal.extraPay==='later'||!modal.extraPay?'checked':''}> ຈ່າຍພາຍຫຼັງ</label>
-            </div>
-          </div>
+          ${renderPayPicker('e', modal.extraPayStore, extraTotal, {label:`ການຊຳລະເງິນສ່ວນເພີ່ມ (${fmtMoney(extraTotal)})`})}
         </div>
         <div class="btn-row">
           <button class="btn btn-primary" id="m-addnights" ${extraNights>0?'':'disabled'}>ເພີ່ມຄືນ ແລະ ບັນທຶກຊຳລະເງິນ</button>
         </div>
       </div>
       <p style="font-size:11px;color:var(--text-mute);margin-top:16px;">ຕ້ອງການແກ້ໄຂຊື່ລູກຄ້າ, ວັນທີເຊັກອິນ/ເຊັກເອົາທ໌ຍ້ອນຫຼັງ, ລາຄາ ຫຼືຊ່ອງທາງຈ່າຍ? ກົດ "✏️ ແກ້ໄຂຂໍ້ມູນ" ດ້ານເທິງ</p>
-      ${unpaid>0 ? `<div class="alert info">ຫ້ອງນີ້ຍັງມີຍອດຄ້າງຊຳລະ ${fmtMoney(unpaid)} — ເລືອກຊ່ອງທາງແລ້ວກົດຊຳລະ ກ່ອນ Check-out ຖ້າລູກຄ້າຈ່າຍແລ້ວ</div>` : ''}
-      ${unpaid>0 ? `<div class="field-grid" style="margin-bottom:8px;"><div class="field"><label>ຊຳລະຄ້າງດ້ວຍຊ່ອງທາງໃດ</label>
-        <select id="settle-method">
-          <option value="cash" ${modal.settleMethod==='cash'?'selected':''}>ຈ່າຍສົດ</option>
-          <option value="bcel" ${modal.settleMethod==='bcel'?'selected':''}>ໂອນ BCEL</option>
-          <option value="ldb" ${modal.settleMethod==='ldb'?'selected':''}>ໂອນ LDB</option>
-          <option value="wechat" ${modal.settleMethod==='wechat'?'selected':''}>WeChat</option>
-        </select></div></div>` : ''}
+      ${unpaid>0 ? `<div class="alert info">ຫ້ອງນີ້ຍັງມີຍອດຄ້າງຊຳລະ ${fmtMoney(unpaid)} — ເລືອກຊ່ອງທາງແລ້ວກົດຊຳລະ ກ່ອນ Check-out ຖ້າລູກຄ້າຈ່າຍແລ້ວ (ຈ່າຍປະສົມ ຫຼື ຈ່າຍບາງສ່ວນກໍ່ໄດ້ — ສ່ວນທີ່ເຫຼືອຍັງຄ້າງຢູ່)</div>` : ''}
+      ${unpaid>0 ? `<div class="field-grid" style="margin-bottom:8px;">${renderPayPicker('st', modal.settleStore, unpaid,
+        {label:'ຊຳລະຄ້າງດ້ວຍຊ່ອງທາງໃດ', methods:['cash','bcel','ldb','wechat'], allowPartial:true})}</div>` : ''}
       <div class="btn-row">
         <button class="btn btn-ghost" id="m-cancel">ປິດ</button>
         ${unpaid>0 ? `<button class="btn btn-settle" id="m-settle">ຊຳລະຄ້າງ (${fmtMoney(unpaid)})</button>` : ''}
@@ -1640,7 +1857,7 @@ function renderCleaningModal(){
 function renderEditModal(){
   const b = state.bookings[modal.bookingId];
   const f = modal.form;
-  const wechatVisible = f.paymentType==='wechat';
+  const wechatVisible = (f.payMethods||[]).includes('wechat');
   const rawNights = (f.checkInDate && f.checkOutDateExp) ? daysBetween(f.checkInDate, f.checkOutDateExp) : b.nights;
   const isShortStay = rawNights === 0;
   const nightsPreview = isShortStay ? 1 : rawNights;
@@ -1669,16 +1886,7 @@ function renderEditModal(){
           <div class="nat-results" id="ef-nat-results"></div>
         </div>
         <div class="field full"><label>ເບີໂທລະສັບ</label><input id="ef-phone" value="${f.phone||''}"></div>
-        <div class="field full">
-          <label>ຮູບແບບການຊຳລະ (ແກ້ໄຂຍ້ອນຫຼັງໄດ້)</label>
-          <div class="radio-row">
-            <label><input type="radio" name="epay" value="cash" id="ef-pay-cash" ${f.paymentType==='cash'?'checked':''}> ຈ່າຍສົດ</label>
-            <label><input type="radio" name="epay" value="bcel" id="ef-pay-bcel" ${f.paymentType==='bcel'?'checked':''}> ໂອນ BCEL</label>
-            <label><input type="radio" name="epay" value="ldb" id="ef-pay-ldb" ${f.paymentType==='ldb'?'checked':''}> ໂອນ LDB</label>
-            <label><input type="radio" name="epay" value="wechat" id="ef-pay-wechat" ${f.paymentType==='wechat'?'checked':''}> WeChat</label>
-            <label><input type="radio" name="epay" value="later" id="ef-pay-later" ${f.paymentType==='later'?'checked':''}> ຈ່າຍພາຍຫຼັງ</label>
-          </div>
-        </div>
+        ${renderPayPicker('ef', f, totalPreview, {label:'ຮູບແບບການຊຳລະ (ແກ້ໄຂຍ້ອນຫຼັງໄດ້)'})}
         <div class="field full" id="ef-wechat-wrap" style="display:${wechatVisible?'flex':'none'};">
           <label>ຈຳນວນເງິນ ຢວນ</label>
           <input type="number" min="0" id="ef-wechat-amount" value="${f.wechatAmount||''}">
@@ -1703,7 +1911,7 @@ function renderGroupBillModal(){
   const bookings = modal.bookingIds.map(id=>state.bookings[id]).filter(b=>b && !b.voided);
   const grand = bookings.reduce((s,b)=>s+b.totalPrice,0);
   const first = bookings[0];
-  const allSamePayment = bookings.every(b=>b.paymentType===first?.paymentType);
+  const allSamePayment = bookings.every(b=>bookingPayLabel(b)===bookingPayLabel(first));
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1713,12 +1921,12 @@ function renderGroupBillModal(){
         <div><span>ຜູ້ຕິດຕໍ່ / ອົງກອນ</span>${first?.guestName||'-'}</div>
         <div><span>ເບີໂທ</span>${first?.phone||'-'}</div>
         <div><span>ວັນເຊັກອິນ</span>${first?fmtDate(first.checkInDate):'-'}</div>
-        <div><span>ການຊຳລະ</span>${allSamePayment ? payLabel(first?.paymentType) : 'ຫຼາຍແບບ (ເບິ່ງລາຍລະອຽດລຸ່ມ)'}</div>
+        <div><span>ການຊຳລະ</span>${allSamePayment ? bookingPayLabel(first) : 'ຫຼາຍແບບ (ເບິ່ງລາຍລະອຽດລຸ່ມ)'}</div>
       </div>
       <table style="margin-top:14px;">
         <thead><tr><th>ຫ້ອງ</th><th>ລູກຄ້າ</th><th>ຄືນ</th><th>ລາຄາ/ຄືນ</th><th>ຈ່າຍແບບ</th><th>ລວມ</th></tr></thead>
         <tbody>
-          ${bookings.map(b=>`<tr><td class="num">${b.roomId}</td><td>${b.guestName||'-'}</td><td>${b.nights}</td><td>${fmtMoney(b.pricePerNight)}</td><td>${payLabel(b.paymentType)}</td><td>${fmtMoney(b.totalPrice)}</td></tr>`).join('')}
+          ${bookings.map(b=>`<tr><td class="num">${b.roomId}</td><td>${b.guestName||'-'}</td><td>${b.nights}</td><td>${fmtMoney(b.pricePerNight)}</td><td>${bookingPayLabel(b)}</td><td>${fmtMoney(b.totalPrice)}</td></tr>`).join('')}
         </tbody>
       </table>
       <div class="total-box">
@@ -1785,7 +1993,11 @@ function updateCheckinLive(source){
   const ciEl = document.getElementById('f-cidate');
   if(ciEl && source!=='cidate') ciEl.value = f.ciDate;
   const wechatWrap = document.getElementById('f-wechat-wrap');
-  if(wechatWrap) wechatWrap.style.display = f.paymentType==='wechat' ? 'flex' : 'none';
+  if(wechatWrap) wechatWrap.style.display = (f.payMethods||[]).includes('wechat') ? 'flex' : 'none';
+  // The split boxes are compared against a bill that moves as nights/prices are typed, so the
+  // balance line is repainted here rather than waiting for a re-render.
+  const payBal = document.getElementById('f-pay-balance');
+  if(payBal) payBal.innerHTML = payBalanceHtml(f, total);
   // Patched in here rather than via render(), so the warning appears as the name/document is
   // typed without the full re-render blowing away the field the user is still in.
   const blWarn = document.getElementById('f-blacklist-warn');
@@ -1825,7 +2037,11 @@ function updateGroupCheckinLive(source){
   const ciEl = document.getElementById('f-cidate');
   if(ciEl && source!=='cidate') ciEl.value = f.ciDate;
   const wechatWrap = document.getElementById('f-wechat-wrap');
-  if(wechatWrap) wechatWrap.style.display = f.paymentType==='wechat' ? 'flex' : 'none';
+  if(wechatWrap) wechatWrap.style.display = (f.payMethods||[]).includes('wechat') ? 'flex' : 'none';
+  // The split boxes are compared against a bill that moves as nights/prices are typed, so the
+  // balance line is repainted here rather than waiting for a re-render.
+  const payBal = document.getElementById('f-pay-balance');
+  if(payBal) payBal.innerHTML = payBalanceHtml(f, total);
   // Patched in here rather than via render(), so the warning appears as the name/document is
   // typed without the full re-render blowing away the field the user is still in.
   const blWarn = document.getElementById('f-blacklist-warn');
@@ -1890,7 +2106,7 @@ function attachHandlers(){
         return;
       }
       if(room.status==='available'){
-        modal = {type:'checkin', roomId:room.id, form:{nights:1, price:room.price, paymentType:'later', receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1)}};
+        modal = {type:'checkin', roomId:room.id, form:{nights:1, price:room.price, payMethods:['later'], payAmounts:{}, receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1)}};
       } else if(room.status==='occupied'){
         const b = state.bookings[room.bookingId];
         const overdue = isOverdueBooking(b);
@@ -1913,7 +2129,7 @@ function attachHandlers(){
   const confirmSelectBtn = document.getElementById('confirm-select');
   if(confirmSelectBtn) confirmSelectBtn.onclick = ()=>{
     if(selectedRooms.length===0) return;
-    modal = {type:'groupCheckin', roomIds:[...selectedRooms], form:{nights:1, paymentType:'later', receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1), prices:{}}};
+    modal = {type:'groupCheckin', roomIds:[...selectedRooms], form:{nights:1, payMethods:['later'], payAmounts:{}, receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1), prices:{}}};
     render();
   };
   const confirmBillBtn = document.getElementById('confirm-bill');
@@ -2044,12 +2260,12 @@ function attachHandlers(){
   });
 
   // reports
+  // The mode dropdown decides which date control is even on screen, so it always re-renders --
+  // same as the one on ຄົ້ນຫາ / ຈັດການ.
+  const rDateType = document.getElementById('r-date-type');
+  if(rDateType) rDateType.onchange = (e)=>{ reportDateType = e.target.value; render(); };
   const rMonth = document.getElementById('r-month');
-  if(rMonth) rMonth.onchange = (e)=>{
-    reportMonth = e.target.value;
-    reportRangeFrom = ''; reportRangeTo = ''; // switching month by hand while a range search is active would just read as "wrong month"
-    render();
-  };
+  if(rMonth) rMonth.onchange = (e)=>{ reportMonth = e.target.value; render(); };
   const rRangeFrom = document.getElementById('r-range-from');
   if(rRangeFrom) rRangeFrom.onchange = (e)=>{ reportRangeFrom = e.target.value; render(); };
   const rRangeTo = document.getElementById('r-range-to');
@@ -2093,16 +2309,10 @@ function attachHandlers(){
     bind('f-cidate','ciDate','cidate');
     bind('f-codate','coDate','codate');
     bind('f-wechat-amount','wechatAmount');
-    const payCash = document.getElementById('f-pay-cash');
-    const payBcel = document.getElementById('f-pay-bcel');
-    const payLdb = document.getElementById('f-pay-ldb');
-    const payWechat = document.getElementById('f-pay-wechat');
-    const payLater = document.getElementById('f-pay-later');
-    if(payCash) payCash.onchange = ()=>{ modal.form.paymentType='cash'; updateCheckinLive(); };
-    if(payBcel) payBcel.onchange = ()=>{ modal.form.paymentType='bcel'; updateCheckinLive(); };
-    if(payLdb) payLdb.onchange = ()=>{ modal.form.paymentType='ldb'; updateCheckinLive(); };
-    if(payWechat) payWechat.onchange = ()=>{ modal.form.paymentType='wechat'; updateCheckinLive(); };
-    if(payLater) payLater.onchange = ()=>{ modal.form.paymentType='later'; updateCheckinLive(); };
+    wirePayPicker('f', modal.form, ()=>{
+      const n = Math.max(1, parseInt(modal.form.nights,10)||1);
+      return n * Math.max(0, parseInt(modal.form.price,10)||0);
+    }, null, ()=>render());
     const submit = document.getElementById('m-submit');
     if(submit) submit.onclick = ()=>{
       if(!confirmBlacklistCheckin(modal.form)) return;
@@ -2137,20 +2347,14 @@ function attachHandlers(){
     document.querySelectorAll('.gc-price').forEach(el=>{
       el.oninput = ()=>{ modal.form.prices[el.dataset.room] = el.value; updateGroupCheckinLive(); };
     });
-    const payCash = document.getElementById('f-pay-cash');
-    const payBcel = document.getElementById('f-pay-bcel');
-    const payLdb = document.getElementById('f-pay-ldb');
-    const payWechat = document.getElementById('f-pay-wechat');
-    const payLater = document.getElementById('f-pay-later');
-    if(payCash) payCash.onchange = ()=>{ modal.form.paymentType='cash'; updateGroupCheckinLive(); };
-    if(payBcel) payBcel.onchange = ()=>{ modal.form.paymentType='bcel'; updateGroupCheckinLive(); };
-    if(payLdb) payLdb.onchange = ()=>{ modal.form.paymentType='ldb'; updateGroupCheckinLive(); };
-    if(payWechat) payWechat.onchange = ()=>{ modal.form.paymentType='wechat'; updateGroupCheckinLive(); };
-    if(payLater) payLater.onchange = ()=>{ modal.form.paymentType='later'; updateGroupCheckinLive(); };
+    wirePayPicker('f', modal.form, ()=>{
+      const n = Math.max(1, parseInt(modal.form.nights,10)||1);
+      return modal.roomIds.reduce((s,id)=>s+n*(parseInt(modal.form.prices[id],10)||0),0);
+    }, null, ()=>render());
     const submitGroup = document.getElementById('m-submit-group');
     if(submitGroup) submitGroup.onclick = ()=>{
       if(!confirmBlacklistCheckin(modal.form)) return;
-      doGroupCheckin(modal.roomIds, modal.form);
+      if(!doGroupCheckin(modal.roomIds, modal.form)) return; // split doesn't add up -- leave the form open
       selectMode=false; selectedRooms=[];
       modal=null; render();
     };
@@ -2164,35 +2368,29 @@ function attachHandlers(){
   if(modal && modal.type==='occupied'){
     const extra = document.getElementById('f-extra');
     if(extra) extra.onchange = ()=>{ modal.targetCheckout = extra.value; render(); };
-    const payCash = document.getElementById('e-pay-cash');
-    const payBcel = document.getElementById('e-pay-bcel');
-    const payLdb = document.getElementById('e-pay-ldb');
-    const payWechat = document.getElementById('e-pay-wechat');
-    const payLater = document.getElementById('e-pay-later');
-    if(payCash) payCash.onchange = ()=>{ modal.extraPay='cash'; };
-    if(payBcel) payBcel.onchange = ()=>{ modal.extraPay='bcel'; };
-    if(payLdb) payLdb.onchange = ()=>{ modal.extraPay='ldb'; };
-    if(payWechat) payWechat.onchange = ()=>{ modal.extraPay='wechat'; };
-    if(payLater) payLater.onchange = ()=>{ modal.extraPay='later'; };
+    const occRoom = state.rooms.find(r=>r.id===modal.roomId);
+    const occBooking = state.bookings[occRoom.bookingId];
+    const extraNightsNow = ()=> Math.max(0, daysBetween(addDays(occBooking.checkInDate, occBooking.nights), modal.targetCheckout));
+    wirePayPicker('e', modal.extraPayStore, ()=> extraNightsNow()*occBooking.pricePerNight, null, ()=>render());
     const addBtn = document.getElementById('m-addnights');
     if(addBtn) addBtn.onclick = ()=>{
-      const room = state.rooms.find(r=>r.id===modal.roomId);
-      const b = state.bookings[room.bookingId];
-      const n = daysBetween(addDays(b.checkInDate,b.nights), modal.targetCheckout);
+      const n = daysBetween(addDays(occBooking.checkInDate, occBooking.nights), modal.targetCheckout);
       if(n < 1){ alert('ວັນທີຕ້ອງຫຼັງວັນຄາດເຊັກເອົາທ໌ປັດຈຸບັນ'); return; }
-      doAddNights(modal.roomId, room.bookingId, n, modal.extraPay||'later');
+      const pay = payParts(modal.extraPayStore, n * occBooking.pricePerNight);
+      if(pay.error){ alert(pay.error); return; }
+      doAddNights(modal.roomId, occRoom.bookingId, n, pay.parts);
     };
     const editBtn = document.getElementById('m-edit-booking');
     if(editBtn) editBtn.onclick = ()=>{
       const room = state.rooms.find(r=>r.id===modal.roomId);
       openEditBookingModal(room.bookingId);
     };
-    const settleMethodEl = document.getElementById('settle-method');
-    if(settleMethodEl) settleMethodEl.onchange = ()=>{ modal.settleMethod = settleMethodEl.value; };
+    wirePayPicker('st', modal.settleStore, ()=> bookingUnpaid(occRoom.bookingId), {allowPartial:true}, ()=>render());
     const settleBtn = document.getElementById('m-settle');
     if(settleBtn) settleBtn.onclick = ()=>{
-      const room = state.rooms.find(r=>r.id===modal.roomId);
-      doSettlePayment(modal.roomId, room.bookingId, modal.settleMethod||'cash');
+      const pay = payParts(modal.settleStore, bookingUnpaid(occRoom.bookingId), {allowPartial:true});
+      if(pay.error){ alert(pay.error); return; }
+      doSettlePayment(modal.roomId, occRoom.bookingId, pay.parts);
     };
     const coBtn = document.getElementById('m-checkout');
     if(coBtn) coBtn.onclick = ()=>{
@@ -2230,21 +2428,17 @@ function attachHandlers(){
     wireNatAutocomplete('ef-nat','ef-nat-results','nationality');
     bind('ef-phone','phone');
     bind('ef-wechat-amount','wechatAmount');
-    const setPay = (val, el)=>{
-      modal.form.paymentType = val;
-      const wrap = document.getElementById('ef-wechat-wrap');
-      if(wrap) wrap.style.display = val==='wechat' ? 'flex' : 'none';
+    // The bill this edit is heading for -- what the split has to add up to, recomputed live because
+    // the dates and the price on this same form are what move it.
+    const editTotal = ()=>{
+      const bk = state.bookings[modal.bookingId];
+      const raw = (modal.form.checkInDate && modal.form.checkOutDateExp)
+        ? daysBetween(modal.form.checkInDate, modal.form.checkOutDateExp) : bk.nights;
+      const n = raw===0 ? 1 : (raw>0 ? raw : bk.nights);
+      const p = modal.form.pricePerNight!==undefined ? (parseInt(modal.form.pricePerNight,10)||0) : bk.pricePerNight;
+      return n * p;
     };
-    const payCash = document.getElementById('ef-pay-cash');
-    const payBcel = document.getElementById('ef-pay-bcel');
-    const payLdb = document.getElementById('ef-pay-ldb');
-    const payWechat = document.getElementById('ef-pay-wechat');
-    const payLater = document.getElementById('ef-pay-later');
-    if(payCash) payCash.onchange = ()=> setPay('cash');
-    if(payBcel) payBcel.onchange = ()=> setPay('bcel');
-    if(payLdb) payLdb.onchange = ()=> setPay('ldb');
-    if(payWechat) payWechat.onchange = ()=> setPay('wechat');
-    if(payLater) payLater.onchange = ()=> setPay('later');
+    wirePayPicker('ef', modal.form, editTotal, null, ()=>render());
     const saveBtn = document.getElementById('m-save-edit');
     if(saveBtn) saveBtn.onclick = ()=>{
       if(modal.form.checkInDate && modal.form.checkOutDateExp){
@@ -2255,6 +2449,10 @@ function attachHandlers(){
         modal.form.shortStay = (n===0);
         modal.form.nights = n===0 ? 1 : n;
       }
+      const pay = payParts(modal.form, editTotal());
+      if(pay.error){ alert(pay.error); return; }
+      modal.form.payParts = pay.parts;
+      modal.form.paymentType = pay.parts.length===1 ? pay.parts[0].method : 'split';
       doSaveEdit(modal.bookingId, modal.form);
     };
     const deleteBtn = document.getElementById('m-delete');
