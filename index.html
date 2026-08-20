@@ -394,6 +394,17 @@ function nowLiveLabel(){
   return `${fmtDate(localDateStr(d))} (${days[d.getDay()]}) · ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 
+// A stay typed in after it already ended: its check-out date is a day that has fully passed, so
+// the guest is long gone and the room in front of staff is free. Recorded straight as "ອອກແລ້ວ"
+// with the room left green -- today's date has nothing to do with a stay that happened last week.
+// A check-out dated *today* is not this: the guest may still be in the room, so that one stays
+// occupied and staff press Check-out when they actually leave.
+function isPastStay(form){
+  const ci = form.ciDate || todayStr();
+  const co = form.coDate || addDays(ci, Math.max(1, parseInt(form.nights,10)||1));
+  return co < todayStr();
+}
+
 // A booking is overdue once its expected checkout date has fully passed.
 function isOverdueBooking(b){
   return !!b && !b.voided && addDays(b.checkInDate, b.nights) < todayStr();
@@ -890,9 +901,11 @@ function repriceNightlyEntries(bookingId, newPrice){
 
 function doGroupCheckin(roomIds, form){
   const ciDate = form.ciDate || todayStr();
-  const time = nowTimeStr();
+  const time = form.ciTime || nowTimeStr();
   const groupId = uid();
   const nights = Math.max(1, parseInt(form.nights,10)||1);
+  const coDate = addDays(ciDate, nights);
+  const past = coDate < todayStr();
   const priceFor = roomId=>{
     const room = state.rooms.find(r=>r.id===roomId);
     return Math.max(0, parseInt((form.prices&&form.prices[roomId])||room.price,10));
@@ -914,11 +927,12 @@ function doGroupCheckin(roomIds, form){
       gender:form.gender||'', docNumber:form.docNumber||'', nationality:form.nationality||'', phone:form.phone||'',
       nights, pricePerNight:price, totalPrice:total, paymentType:'later', payParts:[],
       wechatAmount: usesWechat ? (form.wechatAmount||'') : '',
-      checkInDate: ciDate, checkInTime: time, checkOutDate: null, checkOutTime:'', voided:false, groupId,
-      autoExtendedPending:false
+      checkInDate: ciDate, checkInTime: time,
+      checkOutDate: past ? coDate : null, checkOutTime: past ? (form.coTime||'12:00') : '',
+      voided:false, groupId, autoExtendedPending:false
     };
-    room.status = 'occupied';
-    room.bookingId = bookingId;
+    room.status = past ? 'available' : 'occupied';
+    room.bookingId = past ? null : bookingId;
     const used = pushNightlyRevenueParts(queue, bookingId, roomId, form.guestName||'', ciDate, nights, price, time, 'checkin');
     state.bookings[bookingId].payParts = used;
     state.bookings[bookingId].paymentType = used.length===1 ? used[0].method : 'split';
@@ -936,18 +950,21 @@ function doCheckin(roomId, form){
   if(pay.error){ alert(pay.error); return; }
   const bookingId = uid();
   const ciDate = form.ciDate || todayStr();
-  const time = nowTimeStr();
+  const time = form.ciTime || nowTimeStr();
+  const coDate = addDays(ciDate, nights);
+  const past = coDate < todayStr();
   state.bookings[bookingId] = {
     id:bookingId, roomId, staffName:form.receiverName||'', guestName:form.guestName||'',
     gender:form.gender||'', docNumber:form.docNumber||'', nationality:form.nationality||'', phone:form.phone||'',
     nights, pricePerNight:price, totalPrice:total,
     paymentType: pay.parts.length===1 ? pay.parts[0].method : 'split', payParts: pay.parts,
     wechatAmount: pay.parts.some(p=>p.method==='wechat') ? (form.wechatAmount||'') : '',
-    checkInDate: ciDate, checkInTime: time, checkOutDate: null, checkOutTime:'', voided:false,
-    autoExtendedPending:false
+    checkInDate: ciDate, checkInTime: time,
+    checkOutDate: past ? coDate : null, checkOutTime: past ? (form.coTime||'12:00') : '',
+    voided:false, autoExtendedPending:false
   };
-  room.status = 'occupied';
-  room.bookingId = bookingId;
+  room.status = past ? 'available' : 'occupied';
+  room.bookingId = past ? null : bookingId;
   pushNightlyRevenueParts(payQueue(pay.parts), bookingId, roomId, form.guestName||'', ciDate, nights, price, time, 'checkin');
   saveState();
   modal=null; render();
@@ -985,11 +1002,17 @@ function doSettlePayment(roomId, bookingId, parts){
   render();
 }
 
-function doCheckout(roomId, bookingId, keepModal){
+// The check-out stamp is whatever staff typed on the form, not the clock: a stay recorded a day or
+// three late (guest already gone, or the whole stay entered after the fact with a backdated
+// check-in) has to carry its real departure date, or it never turns up in a ວັນທີເຊັກເອົາທ໌ search
+// and reads as "ອອກແລ້ວ" on the wrong day. Falls back to now when no date is passed.
+function doCheckout(roomId, bookingId, keepModal, coDate, coTime){
   const b = state.bookings[bookingId];
   const room = state.rooms.find(r=>r.id===roomId);
-  b.checkOutDate = todayStr();
-  b.checkOutTime = nowTimeStr();
+  const date = coDate || todayStr();
+  if(date < b.checkInDate){ alert('ວັນທີ Check-out ຕ້ອງບໍ່ກ່ອນວັນທີເຊັກອິນ ('+fmtDate(b.checkInDate)+')'); return; }
+  b.checkOutDate = date;
+  b.checkOutTime = coTime || nowTimeStr();
   room.status = 'cleaning';
   saveState();
   if(!keepModal) modal=null;
@@ -1072,10 +1095,16 @@ function doSaveEdit(bookingId, fields){
   fields.totalPrice = billNights * newPrice;
   // Only re-stamp when the payment picker was actually changed: an edit to the guest's name must
   // never rewrite money rows, and a nights change alone still logs its extra nights as 'later'.
+  // The real check-out stamp is corrected on its own, separately from the expected-checkout field
+  // that drives the nights count -- fixing the day a guest actually left must not re-bill the stay.
+  // Applied after Object.assign so it wins over anything the nights branch above wrote.
+  const realCO = fields.checkOutDateReal, realCOTime = fields.checkOutTimeReal;
+  delete fields.checkOutDateReal; delete fields.checkOutTimeReal;
   const newParts = Array.isArray(fields.payParts) && fields.payParts.length ? fields.payParts : null;
   const payChanged = !!newParts && paySignature(newParts) !== (fields.origPaySig||'');
   delete fields.origPaySig; delete fields.payMethods; delete fields.payAmounts;
   Object.assign(b, fields);
+  if(realCO && b.checkOutDate){ b.checkOutDate = realCO; b.checkOutTime = realCOTime||''; }
   if(payChanged) restampBookingPayments(bookingId, newParts);
   saveState();
   modal=null; render();
@@ -1090,7 +1119,8 @@ function openEditBookingModal(bookingId){
   modal = {type:'editBooking', bookingId:b.id, form:{guestName:b.guestName, gender:b.gender,
     docNumber:b.docNumber, nationality:b.nationality, phone:b.phone, wechatAmount:b.wechatAmount||'',
     payMethods:payStore.payMethods, payAmounts:payStore.payAmounts, origPaySig:paySignature(parts),
-    pricePerNight:b.pricePerNight, checkInDate:b.checkInDate, checkOutDateExp:addDays(b.checkInDate,b.nights)}};
+    pricePerNight:b.pricePerNight, checkInDate:b.checkInDate, checkOutDateExp:addDays(b.checkInDate,b.nights),
+    checkInTime:b.checkInTime||'', checkOutDateReal:b.checkOutDate||'', checkOutTimeReal:b.checkOutTime||''}};
   render();
 }
 
@@ -1644,6 +1674,7 @@ function renderCheckinModal(){
   const total = nights * price;
   const otherVisible = f.receiverSel==='__other';
   const wechatVisible = (f.payMethods||[]).includes('wechat');
+  const pastStay = isPastStay(f);
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1682,9 +1713,16 @@ function renderCheckinModal(){
         <div class="field full"><label>ເບີໂທລະສັບ / ຊ່ອງທາງຕິດຕໍ່</label>
           <input id="f-phone" value="${f.phone||''}"></div>
         <div class="field"><label>ວັນທີ Check-in</label>
-          <input type="date" id="f-cidate" value="${f.ciDate}"></div>
+          <input type="date" id="f-cidate" value="${f.ciDate}" max="${todayStr()}"></div>
+        <div class="field"><label>ເວລາ Check-in${f.ciDate!==todayStr()?' (ບັນທຶກຍ້ອນຫຼັງ)':''}</label>
+          <input type="time" id="f-citime" value="${f.ciTime||nowTimeStr()}"></div>
         <div class="field"><label>ວັນທີ Check-out</label>
           <input type="date" id="f-codate" value="${f.coDate}"></div>
+        <div class="field" id="f-cotime-wrap" style="display:${pastStay?'flex':'none'};">
+          <label>ເວລາ Check-out</label>
+          <input type="time" id="f-cotime" value="${f.coTime||'12:00'}"></div>
+        <div class="field full" id="f-paststay-note" style="display:${pastStay?'flex':'none'};">
+          <p style="font-size:11.5px;color:var(--occupied);margin:0;">📌 ວັນທີ Check-out ຜ່ານໄປແລ້ວ — ບັນທຶກເປັນ "ອອກແລ້ວ" ໃຫ້ທັນທີ ແລະ ຫ້ອງຍັງຫວ່າງ (ສີຂຽວ) ບໍ່ຕ້ອງກົດ Check-out ອີກ</p></div>
         <div class="field"><label>ຈຳນວນຄືນ</label>
           <input type="number" min="1" id="f-nights" value="${f.nights||1}"></div>
         <div class="field"><label>ລາຄາ/ຄືນ (ແກ້ໄຂໄດ້)</label>
@@ -1716,6 +1754,7 @@ function renderGroupCheckinModal(){
   const total = rooms.reduce((s,r)=>s+nights*(parseInt(f.prices[r.id],10)||0),0);
   const otherVisible = f.receiverSel==='__other';
   const wechatVisible = (f.payMethods||[]).includes('wechat');
+  const pastStay = isPastStay(f);
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1754,9 +1793,16 @@ function renderGroupCheckinModal(){
         <div class="field full"><label>ເບີໂທລະສັບ / ຊ່ອງທາງຕິດຕໍ່</label>
           <input id="f-phone" value="${f.phone||''}"></div>
         <div class="field"><label>ວັນທີ Check-in</label>
-          <input type="date" id="f-cidate" value="${f.ciDate}"></div>
+          <input type="date" id="f-cidate" value="${f.ciDate}" max="${todayStr()}"></div>
+        <div class="field"><label>ເວລາ Check-in${f.ciDate!==todayStr()?' (ບັນທຶກຍ້ອນຫຼັງ)':''}</label>
+          <input type="time" id="f-citime" value="${f.ciTime||nowTimeStr()}"></div>
         <div class="field"><label>ວັນທີ Check-out</label>
           <input type="date" id="f-codate" value="${f.coDate}"></div>
+        <div class="field" id="f-cotime-wrap" style="display:${pastStay?'flex':'none'};">
+          <label>ເວລາ Check-out</label>
+          <input type="time" id="f-cotime" value="${f.coTime||'12:00'}"></div>
+        <div class="field full" id="f-paststay-note" style="display:${pastStay?'flex':'none'};">
+          <p style="font-size:11.5px;color:var(--occupied);margin:0;">📌 ວັນທີ Check-out ຜ່ານໄປແລ້ວ — ບັນທຶກເປັນ "ອອກແລ້ວ" ໃຫ້ທັນທີ ແລະ ຫ້ອງຍັງຫວ່າງ (ສີຂຽວ) ບໍ່ຕ້ອງກົດ Check-out ອີກ</p></div>
         <div class="field"><label>ຈຳນວນຄືນ (ໃຊ້ຮ່ວມກັນທຸກຫ້ອງ)</label>
           <input type="number" min="1" id="f-nights" value="${f.nights||1}"></div>
         ${renderPayPicker('f', f, total, {longLater:true})}
@@ -1791,6 +1837,10 @@ function renderOccupiedModal(){
   const extraTotal = Math.max(0, extraNights) * b.pricePerNight;
   if(!modal.extraPayStore) modal.extraPayStore = {payMethods:['later'], payAmounts:{}};
   if(!modal.settleStore) modal.settleStore = {payMethods:['cash'], payAmounts:{}};
+  // Seeded once when the modal opens, then owned by the form -- staff correct it when the guest
+  // actually left earlier than the moment someone got around to pressing the button.
+  if(!modal.coDate) modal.coDate = todayStr();
+  if(!modal.coTime) modal.coTime = nowTimeStr();
   return `
   <div class="modal-overlay" id="overlay">
     <div class="modal">
@@ -1826,6 +1876,18 @@ function renderOccupiedModal(){
       ${unpaid>0 ? `<div class="alert info">ຫ້ອງນີ້ຍັງມີຍອດຄ້າງຊຳລະ ${fmtMoney(unpaid)} — ເລືອກຊ່ອງທາງແລ້ວກົດຊຳລະ ກ່ອນ Check-out ຖ້າລູກຄ້າຈ່າຍແລ້ວ (ຈ່າຍປະສົມ ຫຼື ຈ່າຍບາງສ່ວນກໍ່ໄດ້ — ສ່ວນທີ່ເຫຼືອຍັງຄ້າງຢູ່)</div>` : ''}
       ${unpaid>0 ? `<div class="field-grid" style="margin-bottom:8px;">${renderPayPicker('st', modal.settleStore, unpaid,
         {label:'ຊຳລະຄ້າງດ້ວຍຊ່ອງທາງໃດ', methods:['cash','bcel','ldb','wechat'], allowPartial:true})}</div>` : ''}
+      <div class="panel" style="box-shadow:none;border:1px solid var(--paper-line);padding:16px 18px;margin-top:16px;">
+        <h2 style="font-size:15px;">ວັນ-ເວລາ Check-out ຈິງ</h2>
+        <div class="field-grid">
+          <div class="field"><label>ວັນທີ Check-out</label>
+            <input type="date" id="f-codate-real" value="${modal.coDate}" min="${b.checkInDate}" max="${todayStr()}"></div>
+          <div class="field"><label>ເວລາ Check-out</label>
+            <input type="time" id="f-cotime-real" value="${modal.coTime}"></div>
+        </div>
+        ${modal.coDate!==todayStr()
+          ? `<p style="font-size:11.5px;color:var(--occupied);margin-top:8px;">⚠️ ກຳລັງບັນທຶກ Check-out ຍ້ອນຫຼັງ: ${fmtDate(modal.coDate)} ${modal.coTime}</p>`
+          : `<p style="font-size:11.5px;color:var(--text-mute);margin-top:8px;">ຖ້າແຂກອອກໄປແລ້ວແຕ່ລືມບັນທຶກ ໃຫ້ແກ້ວັນທີ-ເວລານີ້ກ່ອນ ແລ້ວຈຶ່ງກົດ Check-out</p>`}
+      </div>
       <div class="btn-row">
         <button class="btn btn-ghost" id="m-cancel">ປິດ</button>
         ${unpaid>0 ? `<button class="btn btn-settle" id="m-settle">ຊຳລະຄ້າງ (${fmtMoney(unpaid)})</button>` : ''}
@@ -1871,7 +1933,11 @@ function renderEditModal(){
       <h2>ແກ້ໄຂຂໍ້ມູນ — ຫ້ອງ ${b.roomId} ${b.voided?'<span class="badge void" style="margin-left:8px;">ຢູ່ໃນຖັງຂີ້ເຫຍື້ອ</span>':''}</h2>
       <div class="field-grid">
         <div class="field"><label>ວັນທີເຊັກອິນ</label><input type="date" id="ef-checkin" value="${f.checkInDate||''}"></div>
+        <div class="field"><label>ເວລາເຊັກອິນ</label><input type="time" id="ef-checkin-time" value="${f.checkInTime||''}"></div>
         <div class="field"><label>ວັນທີເຊັກເອົາທ໌ (ຄາດ) ${checkoutLabel}</label><input type="date" id="ef-checkout" value="${f.checkOutDateExp||''}"></div>
+        ${b.checkOutDate ? `
+        <div class="field"><label>ວັນທີເຊັກເອົາທ໌ຈິງ (ອອກໄປແລ້ວ)</label><input type="date" id="ef-checkout-real" value="${f.checkOutDateReal||''}"></div>
+        <div class="field"><label>ເວລາເຊັກເອົາທ໌ຈິງ</label><input type="time" id="ef-checkout-time" value="${f.checkOutTimeReal||''}"></div>` : ''}
         <div class="field"><label>ລາຄາ/ຄືນ</label><input type="number" min="0" id="ef-price" value="${pricePreview}"></div>
         <div class="field full"><label>ຊື່-ນາມສະກຸນ ລູກຄ້າ</label><input id="ef-guestname" value="${f.guestName||''}"></div>
         <div class="field"><label>ເພດ</label>
@@ -1992,6 +2058,11 @@ function updateCheckinLive(source){
   if(coEl && source!=='codate') coEl.value = f.coDate;
   const ciEl = document.getElementById('f-cidate');
   if(ciEl && source!=='cidate') ciEl.value = f.ciDate;
+  const coTimeWrap = document.getElementById('f-cotime-wrap');
+  const pastNote = document.getElementById('f-paststay-note');
+  const pastStay = isPastStay(f);
+  if(coTimeWrap) coTimeWrap.style.display = pastStay ? 'flex' : 'none';
+  if(pastNote) pastNote.style.display = pastStay ? 'flex' : 'none';
   const wechatWrap = document.getElementById('f-wechat-wrap');
   if(wechatWrap) wechatWrap.style.display = (f.payMethods||[]).includes('wechat') ? 'flex' : 'none';
   // The split boxes are compared against a bill that moves as nights/prices are typed, so the
@@ -2036,6 +2107,11 @@ function updateGroupCheckinLive(source){
   if(coEl && source!=='codate') coEl.value = f.coDate;
   const ciEl = document.getElementById('f-cidate');
   if(ciEl && source!=='cidate') ciEl.value = f.ciDate;
+  const coTimeWrap = document.getElementById('f-cotime-wrap');
+  const pastNote = document.getElementById('f-paststay-note');
+  const pastStay = isPastStay(f);
+  if(coTimeWrap) coTimeWrap.style.display = pastStay ? 'flex' : 'none';
+  if(pastNote) pastNote.style.display = pastStay ? 'flex' : 'none';
   const wechatWrap = document.getElementById('f-wechat-wrap');
   if(wechatWrap) wechatWrap.style.display = (f.payMethods||[]).includes('wechat') ? 'flex' : 'none';
   // The split boxes are compared against a bill that moves as nights/prices are typed, so the
@@ -2106,7 +2182,7 @@ function attachHandlers(){
         return;
       }
       if(room.status==='available'){
-        modal = {type:'checkin', roomId:room.id, form:{nights:1, price:room.price, payMethods:['later'], payAmounts:{}, receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1)}};
+        modal = {type:'checkin', roomId:room.id, form:{nights:1, price:room.price, payMethods:['later'], payAmounts:{}, receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), ciTime:nowTimeStr(), coDate:addDays(todayStr(),1)}};
       } else if(room.status==='occupied'){
         const b = state.bookings[room.bookingId];
         const overdue = isOverdueBooking(b);
@@ -2129,7 +2205,7 @@ function attachHandlers(){
   const confirmSelectBtn = document.getElementById('confirm-select');
   if(confirmSelectBtn) confirmSelectBtn.onclick = ()=>{
     if(selectedRooms.length===0) return;
-    modal = {type:'groupCheckin', roomIds:[...selectedRooms], form:{nights:1, payMethods:['later'], payAmounts:{}, receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), coDate:addDays(todayStr(),1), prices:{}}};
+    modal = {type:'groupCheckin', roomIds:[...selectedRooms], form:{nights:1, payMethods:['later'], payAmounts:{}, receiverSel:'', receiverOther:'', nationality:'ລາວ', ciDate:todayStr(), ciTime:nowTimeStr(), coDate:addDays(todayStr(),1), prices:{}}};
     render();
   };
   const confirmBillBtn = document.getElementById('confirm-bill');
@@ -2307,6 +2383,8 @@ function attachHandlers(){
     bind('f-nights','nights','nights');
     bind('f-price','price');
     bind('f-cidate','ciDate','cidate');
+    bind('f-citime','ciTime');
+    bind('f-cotime','coTime');
     bind('f-codate','coDate','codate');
     bind('f-wechat-amount','wechatAmount');
     wirePayPicker('f', modal.form, ()=>{
@@ -2342,6 +2420,8 @@ function attachHandlers(){
     bind('f-phone','phone');
     bind('f-nights','nights','nights');
     bind('f-cidate','ciDate','cidate');
+    bind('f-citime','ciTime');
+    bind('f-cotime','coTime');
     bind('f-codate','coDate','codate');
     bind('f-wechat-amount','wechatAmount');
     document.querySelectorAll('.gc-price').forEach(el=>{
@@ -2392,10 +2472,14 @@ function attachHandlers(){
       if(pay.error){ alert(pay.error); return; }
       doSettlePayment(modal.roomId, occRoom.bookingId, pay.parts);
     };
+    const coDateEl = document.getElementById('f-codate-real');
+    if(coDateEl) coDateEl.onchange = ()=>{ modal.coDate = coDateEl.value || todayStr(); render(); };
+    const coTimeEl = document.getElementById('f-cotime-real');
+    if(coTimeEl) coTimeEl.onchange = ()=>{ modal.coTime = coTimeEl.value || nowTimeStr(); };
     const coBtn = document.getElementById('m-checkout');
     if(coBtn) coBtn.onclick = ()=>{
       const room = state.rooms.find(r=>r.id===modal.roomId);
-      doCheckout(modal.roomId, room.bookingId);
+      doCheckout(modal.roomId, room.bookingId, false, modal.coDate, modal.coTime);
     };
   }
 
@@ -2422,6 +2506,9 @@ function attachHandlers(){
       priceInput.oninput = ()=>{ modal.form.pricePerNight = priceInput.value; };
       priceInput.onchange = ()=>{ modal.form.pricePerNight = priceInput.value; render(); };
     }
+    bind('ef-checkin-time','checkInTime');
+    bind('ef-checkout-real','checkOutDateReal');
+    bind('ef-checkout-time','checkOutTimeReal');
     bind('ef-guestname','guestName');
     bind('ef-gender','gender');
     bind('ef-doc','docNumber');
@@ -2441,6 +2528,10 @@ function attachHandlers(){
     wirePayPicker('ef', modal.form, editTotal, null, ()=>render());
     const saveBtn = document.getElementById('m-save-edit');
     if(saveBtn) saveBtn.onclick = ()=>{
+      if(modal.form.checkOutDateReal && modal.form.checkInDate &&
+         modal.form.checkOutDateReal < modal.form.checkInDate){
+        alert('ວັນທີເຊັກເອົາທ໌ຈິງຕ້ອງບໍ່ກ່ອນວັນທີເຊັກອິນ'); return;
+      }
       if(modal.form.checkInDate && modal.form.checkOutDateExp){
         const n = daysBetween(modal.form.checkInDate, modal.form.checkOutDateExp);
         if(n < 0){ alert('ວັນທີເຊັກເອົາທ໌ຕ້ອງບໍ່ກ່ອນວັນທີເຊັກອິນ'); return; }
