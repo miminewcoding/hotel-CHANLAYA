@@ -1199,6 +1199,17 @@ function doPurgeBooking(bookingId){
   saveState();
   render();
 }
+// Starting the hotel's records over from nothing. Lives on the trash page rather than the console
+// bar so it can't be brushed on a phone, takes a typed word rather than an OK button, and drops a
+// backup file first -- this reaches every device through Firestore and there is no undo.
+function doResetEverything(){
+  exportBackup();
+  state = defaultState();
+  saveState();
+  modal = null; view = 'grid';
+  render();
+}
+
 function doEmptyTrash(){
   trashedBookings().forEach(b=>{
     state.revenueLog = state.revenueLog.filter(e=>e.bookingId!==b.id);
@@ -1210,6 +1221,10 @@ function doEmptyTrash(){
 }
 
 /* ---------------- Rendering ---------------- */
+// What was on screen at the end of the last render. Scroll position is only worth restoring when
+// the same thing is still showing -- opening a modal or switching tabs should start at the top.
+let lastRender = {view:null, modalType:null};
+
 function render(){
   const active = document.activeElement;
   let activeId = null, selStart=null, selEnd=null;
@@ -1217,6 +1232,15 @@ function render(){
     activeId = active.id;
     if(typeof active.selectionStart === 'number'){ selStart = active.selectionStart; selEnd = active.selectionEnd; }
   }
+  // The whole page is rebuilt below, which throws away how far down the modal was scrolled (.modal
+  // is the scrolling box, not the page). On a phone that reads as the form jumping back to the top
+  // every single time a payment tick-box is touched -- toggling one re-renders, because the amount
+  // boxes appear and disappear -- leaving staff to scroll back down after every tap.
+  const prevModal = document.querySelector('.modal');
+  const modalScroll = prevModal ? prevModal.scrollTop : 0;
+  const pageScroll = window.scrollY || window.pageYOffset || 0;
+  const sameView = lastRender.view === view;
+  const sameModal = lastRender.modalType === (modal ? modal.type : null);
 
   const app = document.getElementById('app');
   app.innerHTML = `
@@ -1225,15 +1249,24 @@ function render(){
     ${modal ? renderModal() : ''}
   `;
   attachHandlers();
+  lastRender = {view, modalType: modal ? modal.type : null};
 
   if(activeId){
     const el = document.getElementById(activeId);
     if(el){
-      el.focus();
+      // preventScroll: focusing the rebuilt element would otherwise yank it into view on mobile,
+      // fighting the position being put back just below.
+      try{ el.focus({preventScroll:true}); }catch(e){ el.focus(); }
       if(selStart!==null && el.setSelectionRange){
         try{ el.setSelectionRange(selStart, selEnd); }catch(e){}
       }
     }
+  }
+
+  if(sameView && pageScroll) window.scrollTo(0, pageScroll);
+  if(sameModal && modalScroll){
+    const nextModal = document.querySelector('.modal');
+    if(nextModal) nextModal.scrollTop = modalScroll;
   }
 }
 
@@ -1280,6 +1313,12 @@ function renderTrash(){
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
       <h2 style="margin:0;">🗑 ຖັງຂີ້ເຫຍື້ອ (${list.length})</h2>
       ${list.length ? `<button class="btn btn-danger btn-sm" id="trash-empty">ລ້າງຖັງຂີ້ເຫຍື້ອທັງໝົດ</button>` : ''}
+    </div>
+    <div class="alert warn" style="margin-top:14px;">
+      <span>⚠️</span>
+      <div><b>ເລີ່ມຕົ້ນໃໝ່ທັງໝົດ</b> — ລຶບການເຂົ້າພັກ, ຍອດເງິນ ແລະ Blacklist ທັງໝົດ ແລ້ວກັບໄປເປັນຫ້ອງຫວ່າງໝົດທຸກຫ້ອງ
+      (ມີຜົນທຸກອຸປະກອນ ແລະ <b>ກູ້ຄືນບໍ່ໄດ້</b> — ລະບົບຈະດາວໂຫຼດໄຟລ໌ສຳຮອງໃຫ້ກ່ອນ)
+      <div style="margin-top:10px;"><button class="btn btn-danger btn-sm" id="reset-all">♻️ ລ້າງຂໍ້ມູນທັງໝົດ ແລະ ເລີ່ມໃໝ່</button></div></div>
     </div>
     <div class="alert info" style="margin-top:14px;">
       <span>ℹ️</span>
@@ -2162,6 +2201,17 @@ function attachHandlers(){
     if(confirm(`ລ້າງຖັງຂີ້ເຫຍື້ອທັງໝົດ ${n} ລາຍການ?\n\n⚠️ ຈະກູ້ຄືນບໍ່ໄດ້ອີກຕະຫຼອດໄປ`)){
       doEmptyTrash();
     }
+  };
+
+  const resetAllBtn = document.getElementById('reset-all');
+  if(resetAllBtn) resetAllBtn.onclick = ()=>{
+    const stays = Object.keys(state.bookings).length;
+    if(!confirm(`ລ້າງຂໍ້ມູນທັງໝົດ ແລະ ເລີ່ມໃໝ່?\n\nການເຂົ້າພັກ ${stays} ລາຍການ, ຍອດເງິນ ${state.revenueLog.length} ລາຍການ ແລະ Blacklist ${(state.blacklist||[]).length} ລາຍການ ຈະຫາຍໄປໝົດ\n\n⚠️ ມີຜົນທຸກອຸປະກອນ ແລະ ກູ້ຄືນບໍ່ໄດ້`)) return;
+    const typed = prompt('ພິມຄຳວ່າ  ລ້າງ  ເພື່ອຢືນຢັນ (ໄຟລ໌ສຳຮອງຈະຖືກດາວໂຫຼດໃຫ້ອັດຕະໂນມັດ)');
+    if(typed===null) return;
+    if(typed.trim()!=='ລ້າງ'){ alert('ຄຳຢືນຢັນບໍ່ຖືກຕ້ອງ — ບໍ່ໄດ້ລຶບຫຍັງເລີຍ'); return; }
+    doResetEverything();
+    alert('ລ້າງຂໍ້ມູນທັງໝົດແລ້ວ — ເລີ່ມຕົ້ນໃໝ່ໄດ້ເລີຍ (ໄຟລ໌ສຳຮອງຢູ່ໃນໂຟນເດີ Downloads)');
   };
 
   const logoutBtn = document.getElementById('logout-btn');
